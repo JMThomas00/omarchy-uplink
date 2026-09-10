@@ -60,9 +60,8 @@ Column {
   // "" = closed, "add" = new bookmark, "edit" = editing formEditingId
   property string formMode: ""
   property string formEditingId: ""
-  property bool exportImportOpen: false
   property bool settingsOpen: false
-  readonly property bool formOpen: root.formMode !== "" || root.exportImportOpen || root.settingsOpen
+  readonly property bool formOpen: root.formMode !== "" || root.settingsOpen
 
   function hostForAlias(alias) {
     for (var i = 0; i < root.hosts.length; i++)
@@ -95,14 +94,12 @@ Column {
   function openAddForm() {
     root.formMode = "add"
     root.formEditingId = ""
-    root.exportImportOpen = false
     root.settingsOpen = false
   }
 
   function openEditForm(bookmarkId) {
     root.formMode = "edit"
     root.formEditingId = bookmarkId
-    root.exportImportOpen = false
     root.settingsOpen = false
   }
 
@@ -111,15 +108,8 @@ Column {
     root.formEditingId = ""
   }
 
-  function toggleExportImport() {
-    root.exportImportOpen = !root.exportImportOpen
-    root.settingsOpen = false
-    root.formMode = ""
-  }
-
   function toggleSettings() {
     root.settingsOpen = !root.settingsOpen
-    root.exportImportOpen = false
     root.formMode = ""
   }
 
@@ -153,37 +143,24 @@ Column {
 
   // ------------------------------------------------------------------ header
 
-  Row {
+  Item {
     width: parent.width
-    spacing: Style.spacing.controlGap
+    height: Style.space(20)
 
     Text {
-      text: "⚙ Settings"
-      color: root.settingsOpen ? Color.accent : Qt.darker(Color.foreground, 1.3)
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      text: "⚙"
+      color: root.settingsOpen ? Color.accent : Color.foreground
       font.family: Style.font.family
-      font.pixelSize: Style.font.caption
+      font.pixelSize: Style.font.body
 
       MouseArea {
         anchors.fill: parent
-        anchors.margins: -Style.space(4)
+        anchors.margins: -Style.space(6)
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: root.toggleSettings()
-      }
-    }
-
-    Text {
-      text: "⇅ Export/Import"
-      color: root.exportImportOpen ? Color.accent : Qt.darker(Color.foreground, 1.3)
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
-
-      MouseArea {
-        anchors.fill: parent
-        anchors.margins: -Style.space(4)
-        hoverEnabled: true
-        cursorShape: Qt.PointingHandCursor
-        onClicked: root.toggleExportImport()
       }
     }
   }
@@ -192,11 +169,6 @@ Column {
     visible: root.settingsOpen
     width: root.width
     settingsStoreRef: root.settingsStoreRef
-  }
-
-  ExportImportPanel {
-    visible: root.exportImportOpen
-    width: root.width
     bookmarkStoreRef: root.bookmarkStoreRef
   }
 

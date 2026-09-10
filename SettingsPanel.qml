@@ -2,21 +2,27 @@ import QtQuick
 import qs.Ui
 import qs.Commons
 
-// Inline settings form -- probe cadence and the compact-row toggle. No
-// shared "gear icon -> inline settings" component exists anywhere in this
-// shell to copy (confirmed) -- same inline-expand shape as every other
-// panel in this plugin (BookmarkForm, ExportImportPanel).
+// Inline settings form -- probe cadence, the compact-row toggle, and (as a
+// nested expandable sub-section, not a separate top-level popup link)
+// Export/Import. No shared "gear icon -> inline settings" component exists
+// anywhere in this shell to copy (confirmed) -- same inline-expand shape as
+// every other panel in this plugin (BookmarkForm, ExportImportPanel).
 Item {
   id: root
 
   property var settingsStoreRef: null
+  property var bookmarkStoreRef: null
+  property bool exportImportOpen: false
 
   implicitWidth: Style.space(360)
   implicitHeight: column.implicitHeight
 
-  onVisibleChanged: if (visible && root.settingsStoreRef) {
-    probeIntervalField.value = root.settingsStoreRef.probeIntervalSec
-    popupIntervalField.value = root.settingsStoreRef.popupProbeIntervalSec
+  onVisibleChanged: {
+    if (visible && root.settingsStoreRef) {
+      probeIntervalField.value = root.settingsStoreRef.probeIntervalSec
+      popupIntervalField.value = root.settingsStoreRef.popupProbeIntervalSec
+    }
+    if (!visible) root.exportImportOpen = false
   }
 
   Column {
@@ -75,6 +81,27 @@ Item {
         font.pixelSize: Style.font.bodySmall
         anchors.verticalCenter: parent.verticalCenter
       }
+    }
+
+    Text {
+      text: (root.exportImportOpen ? "▾" : "▸") + " Export/Import"
+      color: root.exportImportOpen ? Color.accent : Qt.darker(Color.foreground, 1.3)
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+
+      MouseArea {
+        anchors.fill: parent
+        anchors.margins: -Style.space(4)
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.exportImportOpen = !root.exportImportOpen
+      }
+    }
+
+    ExportImportPanel {
+      visible: root.exportImportOpen
+      width: parent.width
+      bookmarkStoreRef: root.bookmarkStoreRef
     }
   }
 }

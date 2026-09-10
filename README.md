@@ -133,18 +133,19 @@ them, or use each bookmark's delete button before uninstalling.
   for that host once it's down -- requires `wakeonlan` installed
   (`sudo pacman -S wakeonlan`); the button simply doesn't appear otherwise.
 
-### Settings & Export/Import
+### Settings
 
-Two small links at the top of the popup:
-- **⚙ Settings** -- background and popup-open probe intervals (seconds),
-  and a compact-row toggle that hides the second line (subtitle, latency,
-  notes indicator) for a denser list.
-- **⇅ Export/Import** -- writes/reads your bookmarks as plain JSON (default
-  path `~/uplink-bookmarks-export.json`, editable). Import is
-  additive -- it never replaces your existing bookmarks, and reuses the
-  exact same validation as adding one by hand, so an imported entry that
-  collides with an existing label (or fails validation) is skipped, not
-  fatal to the rest of the import; you'll get a one-line summary either way.
+Click the **⚙** icon in the top-right of the popup for:
+- Background and popup-open probe intervals (seconds), and a compact-row
+  toggle that hides the second line (subtitle, latency, notes indicator)
+  for a denser list.
+- **Export/Import** (behind its own "▸ Export/Import" expander within
+  Settings) -- writes/reads your bookmarks as plain JSON (default path
+  `~/uplink-bookmarks-export.json`, editable). Import is additive -- it
+  never replaces your existing bookmarks, and reuses the exact same
+  validation as adding one by hand, so an imported entry that collides
+  with an existing label (or fails validation) is skipped, not fatal to
+  the rest of the import; you'll get a one-line summary either way.
 
 ## How it works, briefly
 
