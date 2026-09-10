@@ -61,7 +61,9 @@ Column {
   property string formMode: ""
   property string formEditingId: ""
   property bool settingsOpen: false
-  readonly property bool formOpen: root.formMode !== "" || root.settingsOpen
+  // "" = closed, else the plain ~/.ssh/config alias being renamed.
+  property string configRenameTarget: ""
+  readonly property bool formOpen: root.formMode !== "" || root.settingsOpen || root.configRenameTarget !== ""
 
   function hostForAlias(alias) {
     for (var i = 0; i < root.hosts.length; i++)
@@ -95,12 +97,14 @@ Column {
     root.formMode = "add"
     root.formEditingId = ""
     root.settingsOpen = false
+    root.configRenameTarget = ""
   }
 
   function openEditForm(bookmarkId) {
     root.formMode = "edit"
     root.formEditingId = bookmarkId
     root.settingsOpen = false
+    root.configRenameTarget = ""
   }
 
   function closeForm() {
@@ -111,6 +115,17 @@ Column {
   function toggleSettings() {
     root.settingsOpen = !root.settingsOpen
     root.formMode = ""
+    root.configRenameTarget = ""
+  }
+
+  function openConfigRename(alias) {
+    root.configRenameTarget = alias
+    root.formMode = ""
+    root.settingsOpen = false
+  }
+
+  function closeConfigRename() {
+    root.configRenameTarget = ""
   }
 
   readonly property var _editingBookmark: {
@@ -308,11 +323,28 @@ Column {
 
       delegate: HostRow {
         width: root.width
+        editable: true
         compact: root.settingsStoreRef ? root.settingsStoreRef.compactRows : false
         host: modelData
         dotColor: root.statusColorFor ? root.statusColorFor(modelData.status) : Color.muted
         onConnectRequested: function(alias) { root.connectRequested(alias) }
+        // Deliberately NOT the bookmark delegate's handlers (bookmarkId is
+        // always "" here) -- rename opens the minimal alias-only form
+        // below, delete goes straight to BookmarkStore's plain-host path.
+        // See SshConfigHostEditor.js / BookmarkStore.renameConfigHost for
+        // why only the alias is editable this way.
+        onEditRequested: function() { root.openConfigRename(modelData.alias) }
+        onDeleteRequested: function() { if (root.bookmarkStoreRef) root.bookmarkStoreRef.deleteConfigHost(modelData.alias) }
       }
+    }
+
+    ConfigHostRenameForm {
+      visible: root.configRenameTarget !== ""
+      width: root.width
+      bookmarkStore: root.bookmarkStoreRef
+      targetAlias: root.configRenameTarget
+      onSaved: root.closeConfigRename()
+      onCancelled: root.closeConfigRename()
     }
 
     Text {

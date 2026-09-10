@@ -97,6 +97,19 @@ them, or use each bookmark's delete button before uninstalling.
   `ssh <alias>` into it.
 - Editing `~/.ssh/config` (adding, removing, or renaming a `Host` entry)
   picks up live -- no restart needed.
+- **Rename or delete a "From ~/.ssh/config" entry** with its own pencil/×
+  icons, same as a bookmark -- but deliberately more limited: only the
+  alias itself is editable this way, since a hand-authored entry can carry
+  directives (`IdentityFile`, `ProxyJump`, whatever else you've written)
+  this plugin doesn't try to understand or reproduce. Renaming touches
+  only the `Host` line; if the entry had no explicit `HostName` (i.e. the
+  alias itself was the connection target), one is added automatically so
+  the real target is never lost, no matter what you rename it to.
+  Everything else in the block -- `IdentityFile`, `Port`, comments, your
+  own formatting -- is left completely untouched. A `Host` line that
+  defines more than one alias (`Host a b`) is left alone; rename/delete it
+  directly in `~/.ssh/config` instead. Deleting uses the same two-click
+  "Confirm?" pattern as a bookmark.
 
 ### Bookmarks
 

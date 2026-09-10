@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import "SshConfigParser.js" as SshConfigParser
 import "SshConfigBlockWriter.js" as SshConfigBlockWriter
+import "SshConfigHostEditor.js" as SshConfigHostEditor
 
 // Owns bookmark persistence (~/.config/uplink/bookmarks.json) and
 // the safe write-back of each bookmark into a sentinel-delimited Host
@@ -328,5 +329,59 @@ Item {
     root.bookmarks = root.bookmarks.filter(function(b) { return b.id !== id })
     root._removeBookmarkBlock(id)
     root._scheduleSave()
+  }
+
+  // ---------------------------------------------------- plain config hosts
+  //
+  // Rename/delete for a hand-authored Host block from ~/.ssh/config that
+  // this plugin did NOT create (as opposed to a bookmark's own sentinel-
+  // delimited block, which the functions above fully own and freely
+  // re-render). Deliberately narrower than the bookmark path: only the
+  // alias itself is ever editable this way -- see SshConfigHostEditor.js
+  // for why (never touches a directive it doesn't fully understand, like
+  // IdentityFile/IdentitiesOnly/CheckHostIP, both real on this machine's
+  // own git.lab.t-share.cc and Proxmox entries). No bookmarks.json
+  // involvement in either function -- these aren't bookmarks, and there's
+  // no "config entry missing" recovery to wire up either: unlike a
+  // bookmark, a plain host has no independent tracking outside the file
+  // itself, so a vanished block just drops out of BarWidget's own
+  // `root.hosts` cleanly on its next ~/.ssh/config reload.
+
+  // Returns "" on success, or an error string the rename form should show
+  // inline and stay open on.
+  function renameConfigHost(oldAlias, newAlias) {
+    var found = SshConfigHostEditor.findHostBlockLines(root._sshConfigText, oldAlias)
+    if (!found) return "Couldn't find \"" + oldAlias + "\" in ~/.ssh/config -- it may have just been edited or removed externally."
+    if (found.multiAlias) return "This Host line defines multiple aliases -- rename it directly in ~/.ssh/config."
+
+    var alias = String(newAlias || "").trim()
+    if (alias === oldAlias) return "" // no-op: nothing changed, nothing to write
+
+    if (!alias) return "Alias is required."
+    if (!root._labelRe.test(alias)) return "Alias may only contain letters, digits, '.', '_', '-' (no spaces or wildcards)."
+
+    var bookmarkLabels = root.bookmarks.map(function(b) { return b.label })
+    if (bookmarkLabels.indexOf(alias) !== -1) return "\"" + alias + "\" is already used by a bookmark."
+
+    var otherAliases = SshConfigParser.parseHostAliases(root._sshConfigText).aliases
+      .filter(function(a) { return a !== oldAlias })
+    if (otherAliases.indexOf(alias) !== -1) return "\"" + alias + "\" is already used by another ~/.ssh/config entry."
+
+    var newText = SshConfigHostEditor.renameHostBlock(root._sshConfigText, oldAlias, alias)
+    if (newText === null) return "Couldn't rename \"" + oldAlias + "\" -- it may have just changed externally. Try again."
+    root._writeConfigText(newText)
+    return ""
+  }
+
+  function deleteConfigHost(alias) {
+    var found = SshConfigHostEditor.findHostBlockLines(root._sshConfigText, alias)
+    if (!found) return // already gone
+    if (found.multiAlias) {
+      console.warn("uplink: \"" + alias + "\" shares its Host line with another alias -- not deleting, to avoid silently breaking the other one. Edit ~/.ssh/config directly.")
+      return
+    }
+    var newText = SshConfigHostEditor.removeHostBlock(root._sshConfigText, alias)
+    if (newText === root._sshConfigText) return // already absent -- nothing to write
+    root._writeConfigText(newText)
   }
 }

@@ -13,17 +13,49 @@
 // here, since this only scans the top-level file's own lines. Any Include
 // line found sets sawInclude so BarWidget.qml can surface a small footer
 // note in the popup rather than silently under-listing.
+
+// Strips a trailing comment and surrounding whitespace from one raw line.
+// Shared by every line-classification helper below AND by
+// SshConfigHostEditor.js -- kept in exactly one place so a plain-host
+// block's boundaries (found by SshConfigHostEditor) can never be computed
+// against a different notion of "what counts as a Host line" than the one
+// that put a row on screen in the first place (parseHostAliases, below).
+function stripComment(line) {
+  return line.replace(/#.*/, "").trim()
+}
+
+// If `line` is a top-level "Host" directive, returns its raw alias tokens
+// (may be more than one -- see parseHostAliases's own dedup/filtering);
+// otherwise returns null. Deliberately does NOT filter out wildcard/
+// pattern tokens the way parseHostAliases's alias list does -- boundary
+// detection needs to recognize a Host line as a Host line regardless of
+// what its tokens look like.
+function hostLineTokens(line) {
+  var stripped = stripComment(line)
+  if (stripped.length === 0) return null
+  var m = stripped.match(/^Host\s+(.+)$/i)
+  if (!m) return null
+  return m[1].trim().split(/\s+/)
+}
+
+// True if `line` is a top-level "Match" directive. Match blocks never
+// surface as rows (parseHostAliases only ever emits Host tokens), but they
+// still terminate a preceding Host block the same way a following Host
+// line does.
+function isMatchLine(line) {
+  return /^Match\s+/i.test(stripComment(line))
+}
+
 function parseHostAliases(raw) {
   var lines = String(raw || "").split("\n")
   var aliases = []
   var sawInclude = false
   for (var i = 0; i < lines.length; i++) {
-    var line = lines[i].replace(/#.*/, "").trim()
-    if (line.length === 0) continue
-    if (/^Include\s+/i.test(line)) { sawInclude = true; continue }
-    var hostMatch = line.match(/^Host\s+(.+)$/i)
-    if (!hostMatch) continue
-    var tokens = hostMatch[1].trim().split(/\s+/)
+    var stripped = stripComment(lines[i])
+    if (stripped.length === 0) continue
+    if (/^Include\s+/i.test(stripped)) { sawInclude = true; continue }
+    var tokens = hostLineTokens(lines[i])
+    if (!tokens) continue
     for (var t = 0; t < tokens.length; t++) {
       var alias = tokens[t]
       if (alias.indexOf("*") !== -1 || alias.indexOf("?") !== -1) continue // skip wildcard/pattern entries
