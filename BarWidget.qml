@@ -528,6 +528,38 @@ BarWidget {
     proc.running = true
   }
 
+  // ------------------------------------------------------- Browse (SFTP)
+  //
+  // Same optional-dependency shape as Wake-on-LAN above. `xdg-open
+  // sftp://...` has no registered handler on this system (confirmed:
+  // `gio mime x-scheme-handler/sftp` -> "No default applications") --
+  // launching nautilus directly with the URI works regardless of that
+  // missing MIME registration (confirmed live against a real host), so
+  // that's what this checks for and calls, not a generic default-app
+  // lookup.
+  property bool fileManagerAvailable: true
+
+  Process {
+    id: fileManagerCheckProc
+    command: []
+    onExited: function(exitCode) { root.fileManagerAvailable = exitCode === 0 }
+  }
+
+  function _checkFileManager() {
+    if (fileManagerCheckProc.running) return
+    fileManagerCheckProc.command = ["which", "nautilus"]
+    fileManagerCheckProc.running = true
+  }
+
+  Component { id: fileManagerProcComponent; Process {} }
+
+  function openFileManager(uri) {
+    if (!uri) return
+    var proc = fileManagerProcComponent.createObject(root, { command: ["nautilus", uri] })
+    proc.exited.connect(function() { proc.destroy() })
+    proc.running = true
+  }
+
   // ------------------------------------------------------- state/cache
   //
   // Deliberately outside ~/.config/omarchy/plugins/uplink/ (this
@@ -599,7 +631,7 @@ BarWidget {
     onExited: stateFile.reload()
   }
 
-  Component.onCompleted: { mkdirProc.running = true; root._checkWakeonlan() }
+  Component.onCompleted: { mkdirProc.running = true; root._checkWakeonlan(); root._checkFileManager() }
 
   // --------------------------------------------------------------- theming
   //
@@ -630,7 +662,7 @@ BarWidget {
     return Color.muted
   }
 
-  onOpenedChanged: if (root.opened) { themeColorsFile.reload(); root._probeAllFull(); root._pollConnected(); root._checkWakeonlan() }
+  onOpenedChanged: if (root.opened) { themeColorsFile.reload(); root._probeAllFull(); root._pollConnected(); root._checkWakeonlan(); root._checkFileManager() }
 
   // ---------------------------------------------------------- terminal launch
   //
@@ -784,8 +816,10 @@ BarWidget {
           sawInclude: root.sawInclude
           statusColorFor: root.colorForStatus
           wakeonlanAvailable: root.wakeonlanAvailable
+          fileManagerAvailable: root.fileManagerAvailable
           onConnectRequested: function(alias) { root.connectToHost(alias) }
           onWakeRequested: function(mac) { root.wakeHost(mac) }
+          onBrowseRequested: function(uri) { root.openFileManager(uri) }
         }
       }
     }

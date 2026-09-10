@@ -50,9 +50,11 @@ Column {
   property var statusColorFor: null   // function(status) -> color
   property bool sawInclude: false
   property bool wakeonlanAvailable: true
+  property bool fileManagerAvailable: true
 
   signal connectRequested(string alias)
   signal wakeRequested(string mac)
+  signal browseRequested(string uri)
 
   width: Style.space(460)
   spacing: Style.spacing.panelGap
@@ -262,6 +264,7 @@ Column {
             editable: true
             compact: root.settingsStoreRef ? root.settingsStoreRef.compactRows : false
             wakeonlanAvailable: root.wakeonlanAvailable
+            fileManagerAvailable: root.fileManagerAvailable
             bookmarkId: modelData.id
             host: root._displayHostForBookmark(modelData)
             dotColor: root.statusColorFor ? root.statusColorFor(host.status) : Color.muted
@@ -269,6 +272,7 @@ Column {
             onEditRequested: function(bookmarkId) { root.openEditForm(bookmarkId) }
             onDeleteRequested: function(bookmarkId) { if (root.bookmarkStoreRef) root.bookmarkStoreRef.deleteBookmark(bookmarkId) }
             onWakeRequested: function(mac) { root.wakeRequested(mac) }
+            onBrowseRequested: function(uri) { root.browseRequested(uri) }
           }
         }
 
@@ -325,6 +329,7 @@ Column {
         width: root.width
         editable: true
         compact: root.settingsStoreRef ? root.settingsStoreRef.compactRows : false
+        fileManagerAvailable: root.fileManagerAvailable
         host: modelData
         dotColor: root.statusColorFor ? root.statusColorFor(modelData.status) : Color.muted
         onConnectRequested: function(alias) { root.connectRequested(alias) }
@@ -335,6 +340,7 @@ Column {
         // why only the alias is editable this way.
         onEditRequested: function() { root.openConfigRename(modelData.alias) }
         onDeleteRequested: function() { if (root.bookmarkStoreRef) root.bookmarkStoreRef.deleteConfigHost(modelData.alias) }
+        onBrowseRequested: function(uri) { root.browseRequested(uri) }
       }
     }
 

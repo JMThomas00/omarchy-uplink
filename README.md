@@ -25,6 +25,10 @@ connections too, right alongside them.
   SSH itself is actually up.
 - **One-click connect** -- opens a real terminal already running
   `ssh <alias>`, using whatever terminal you've actually got configured.
+- **Browse files** -- a small 📁 button opens the host's filesystem in
+  GNOME Files over SFTP, reusing the same SSH access (no extra password
+  prompt beyond what SSH itself needs). Needs `nautilus` installed; the
+  button just doesn't appear otherwise.
 - **Bar icon alerts** the instant any host goes down, even with the popup
   closed -- with a small count badge showing how many.
 - **Live latency**, in ms, measured off the same banner probe that drives
@@ -198,6 +202,16 @@ enumerated by this plugin's host list yet -- a small note appears in the
 popup when this applies. Everything else about how a host resolves (the
 Include'd file's own settings) still applies correctly once a host *is*
 listed, since resolution itself goes through `ssh -G`.
+
+**Another:** Browse only works against a host whose `sshd` actually offers
+the SFTP subsystem -- a restricted, command-only SSH endpoint (this
+plugin's own `git.lab.t-share.cc` example entry, a Forgejo instance's
+embedded git-only server, is a real one) will authenticate fine but then
+refuse the SFTP request itself; GNOME Files shows this as its own "don't
+have permission to access the requested location" error. Nothing this
+plugin can do about that -- it's the remote server's own restriction, the
+same way that host also can't run `uptime` for this plugin's own live
+uptime feature.
 
 ## License
 

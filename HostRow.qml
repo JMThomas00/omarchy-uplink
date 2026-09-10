@@ -31,6 +31,7 @@ Column {
   property bool editable: false
   property bool compact: false
   property bool wakeonlanAvailable: true
+  property bool fileManagerAvailable: true
   // Only meaningful when editable -- the bookmark's own stable id (distinct
   // from `host.alias`, which is the user-chosen, renameable label).
   property string bookmarkId: ""
@@ -39,6 +40,7 @@ Column {
   signal editRequested(string bookmarkId)
   signal deleteRequested(string bookmarkId)
   signal wakeRequested(string mac)
+  signal browseRequested(string uri)
 
   width: Style.space(410)
   spacing: Style.spacing.xxs
@@ -61,6 +63,17 @@ Column {
     return (ms === null || ms === undefined) ? "—" : Math.round(ms) + "ms"
   }
   readonly property bool showWake: root.editable && root.host && !!root.host.mac && root.wakeonlanAvailable && root.host.status === "down"
+
+  // Deliberately NOT gated by `editable` -- unlike Wake/Edit/Delete (all
+  // bookmark-only write actions), browsing is read-only and equally
+  // useful on a plain ~/.ssh/config row.
+  readonly property string sftpUri: {
+    if (!root.host || !root.host.hostname) return ""
+    var userPart = root.host.user ? encodeURIComponent(root.host.user) + "@" : ""
+    var portPart = root.host.port && root.host.port !== "22" ? ":" + root.host.port : ""
+    return "sftp://" + userPart + encodeURIComponent(root.host.hostname) + portPart + "/"
+  }
+  readonly property bool showBrowse: root.fileManagerAvailable && root.sftpUri !== ""
 
   // Two-click delete confirm: first click arms it (icon fills urgent-red)
   // for a few seconds; a second click within that window actually deletes;
@@ -188,6 +201,30 @@ Column {
               deleteConfirmTimer.restart()
             }
           }
+        }
+      }
+
+      Rectangle {
+        id: browseButton
+        visible: root.showBrowse
+        width: Style.space(20)
+        height: Style.space(20)
+        radius: Style.cornerRadius
+        color: browseArea.containsMouse ? Style.hoverFill : "transparent"
+
+        Text {
+          anchors.centerIn: parent
+          text: "📁"
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        MouseArea {
+          id: browseArea
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.browseRequested(root.sftpUri)
         }
       }
 
