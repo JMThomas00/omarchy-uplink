@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "jmthomas00.uplink",
+  "name": "Uplink",
+  "version": "2.0.1",
+  "author": "Jordan Thomas (JMThomas00)",
+  "license": "MIT",
+  "description": "Live reachability, uptime, and one-click terminal launch for every host in ~/.ssh/config -- plus save-your-own bookmarked connections.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Uplink",
+    "description": "Status dot per SSH host, live uptime, one-click connect",
+    "category": "Network",
+    "allowMultiple": false
+  }
+}
