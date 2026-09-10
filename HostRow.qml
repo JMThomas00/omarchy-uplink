@@ -70,7 +70,7 @@ Column {
 
   Timer {
     id: deleteConfirmTimer
-    interval: 3000
+    interval: 5000
     repeat: false
     onTriggered: root.deleteConfirming = false
   }
@@ -156,14 +156,18 @@ Column {
       Rectangle {
         id: deleteButton
         visible: root.editable
-        width: Style.space(20)
+        width: root.deleteConfirming ? Style.space(64) : Style.space(20)
         height: Style.space(20)
         radius: Style.cornerRadius
         color: root.deleteConfirming ? Color.urgent : (deleteArea.containsMouse ? Style.hoverFill : "transparent")
 
+        Behavior on width {
+          NumberAnimation { duration: 160 }
+        }
+
         Text {
           anchors.centerIn: parent
-          text: "✕"
+          text: root.deleteConfirming ? "Confirm?" : "✕"
           color: root.deleteConfirming ? Color.background : Color.foreground
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall

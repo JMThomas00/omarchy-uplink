@@ -113,8 +113,10 @@ them, or use each bookmark's delete button before uninstalling.
   touching anything else in the file -- meaning **`ssh Juniper` works from
   any terminal**, not just from this widget.
 - The pencil icon on a bookmark's row edits it (including renaming its
-  alias); the × requires two clicks (first click arms it, second confirms)
-  since deleting also removes the real `~/.ssh/config` entry.
+  alias); the × requires two clicks (first click arms it -- it turns red
+  and its label changes to "Confirm?" so it's obvious a second click is
+  needed -- second click within 5 seconds actually deletes) since deleting
+  also removes the real `~/.ssh/config` entry.
 - The very first time this plugin writes to `~/.ssh/config`, it makes a
   one-time backup at `~/.ssh/config.pre-uplink.bak`.
 - If you delete a bookmark's `Host` block by hand (bypassing the plugin),
