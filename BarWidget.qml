@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Ui
@@ -800,10 +801,35 @@ BarWidget {
       onCloseRequested: root.closePanel()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Loader {
-        id: contentLoader
-        width: parent.width
-        sourceComponent: hostListComponent
+      // The popup's own height caps at Style.space(560) (see contentHeight
+      // above) or the screen's available space, whichever is smaller --
+      // but the Bookmarks/config content below has no upper bound of its
+      // own (more bookmarks, more groups, the inline edit form, ssh config
+      // hosts). Without this Flickable, content taller than that cap just
+      // rendered straight past the card's border with nothing to clip or
+      // scroll it (reported live: editing a bookmark into a new group,
+      // with the form's validation error showing, pushed the "From
+      // ~/.ssh/config" section and even the form's own Save/Cancel row
+      // below the visible card). Keys.priority: Keys.BeforeItem on the
+      // PanelKeyCatcher above (see its own header comment) means this
+      // Flickable's drag/wheel scrolling can't steal j/k/arrow list
+      // navigation from it either.
+      Flickable {
+        id: contentFlick
+        anchors.fill: parent
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        contentWidth: width
+        contentHeight: contentLoader.item ? contentLoader.item.implicitHeight : 0
+        interactive: contentHeight > height
+
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Loader {
+          id: contentLoader
+          width: parent.width
+          sourceComponent: hostListComponent
+        }
       }
 
       Component {

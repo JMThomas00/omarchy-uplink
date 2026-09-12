@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jmthomas00.uplink",
   "name": "Uplink",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "author": "Jordan Thomas (JMThomas00)",
   "license": "MIT",
   "description": "Live reachability, uptime, and one-click terminal launch for every host in ~/.ssh/config -- plus save-your-own bookmarked connections.",

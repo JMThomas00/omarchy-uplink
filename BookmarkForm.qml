@@ -57,7 +57,29 @@ Item {
 
   readonly property var groupSuggestions: root.bookmarkStore ? root.bookmarkStore.groupNames : []
 
-  onVisibleChanged: if (visible) {
+  // Deferred via Qt.callLater rather than copied directly in reaction to
+  // `visible` -- confirmed live (temporary console.warn tracing) that when
+  // this form is a single persistent instance (hoisted out of the group
+  // Repeater, see HostList.qml) rather than freshly constructed per open,
+  // QML fires this object's OWN onVisibleChanged/onXChanged handlers in
+  // property-DECLARATION order as `root.formMode`/`formEditingId` change in
+  // HostList: `visible` is declared first at the instantiation site, so its
+  // changed-handler ran and read `editingId`/`initialLabel` BEFORE their own
+  // bindings (declared later) had been re-evaluated against the new
+  // formMode/formEditingId -- copying blank values into the fields even
+  // though root.initialLabel etc were already correct microseconds later.
+  // A freshly-constructed instance never hit this (construction evaluates
+  // every property's binding once, up front, with no notification-order
+  // dependency), which is why this only ever showed up after hoisting this
+  // into one stable, reused instance -- and why closing/reopening the whole
+  // popup (destroying and recreating this instance) used to appear to
+  // "fix" it. Qt.callLater runs after the current synchronous notification
+  // cascade fully settles, so by the time this reads initial*, every
+  // sibling property on this same instance is guaranteed current.
+  onVisibleChanged: if (visible) Qt.callLater(root._loadFields)
+
+  function _loadFields() {
+    if (!root.visible) return
     labelField.text = root.initialLabel
     hostField.text = root.initialHostname
     portField.value = Number(root.initialPort) || 22
@@ -68,7 +90,7 @@ Item {
     notesField.text = root.initialNotes
     root.advancedOpen = root.initialMac !== "" || root.initialNotes !== ""
     root.errorText = ""
-    Qt.callLater(function() { labelField.forceActiveFocus() })
+    labelField.forceActiveFocus()
   }
 
   Column {
@@ -121,17 +143,29 @@ Item {
     Row {
       spacing: Style.spacing.controlGap
 
-      TextField {
-        id: iconField
-        width: Style.space(60)
-        placeholderText: "🥧"
-        verticalPadding: Style.spacing.controlPaddingY
-        onAccepted: root._submit()
-        Keys.onEscapePressed: root.cancelled()
+      Column {
+        spacing: Style.spacing.md
+
+        Text {
+          text: "Icon"
+          color: Qt.darker(Color.foreground, 1.4)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        TextField {
+          id: iconField
+          width: Style.space(60)
+          placeholderText: "Optional"
+          verticalPadding: Style.spacing.controlPaddingY
+          onAccepted: root._submit()
+          Keys.onEscapePressed: root.cancelled()
+        }
       }
 
       TextField {
         id: groupField
+        anchors.bottom: parent.bottom
         width: Style.space(232)
         placeholderText: "Group (optional)"
         verticalPadding: Style.spacing.controlPaddingY

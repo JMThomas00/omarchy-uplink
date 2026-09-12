@@ -103,8 +103,16 @@ Column {
   }
 
   function openEditForm(bookmarkId) {
-    root.formMode = "edit"
+    // formEditingId set before formMode so _editingBookmark already
+    // resolves correctly by the time formMode's change makes the form
+    // visible -- belt-and-suspenders alongside BookmarkForm's own
+    // Qt.callLater field-load (see its onVisibleChanged comment for why
+    // that, not this ordering, is what actually fixed the blank-on-open
+    // bug: the real cause was QML firing this instance's onVisibleChanged
+    // before its sibling editingId/initial* bindings had caught up with
+    // the same change, independent of which property HostList wrote first).
     root.formEditingId = bookmarkId
+    root.formMode = "edit"
     root.settingsOpen = false
     root.configRenameTarget = ""
   }
@@ -162,9 +170,18 @@ Column {
 
   Item {
     width: parent.width
-    height: Style.space(20)
+    // Sized to the gear glyph's own implicitHeight, not a fixed spacing
+    // token -- Style.space(20) (a layout-spacing token) and the glyph's
+    // actual rendered size scale independently under
+    // effectiveSpacingScale = spacingScale * fontScale, so on a theme/
+    // config where spacingScale runs ahead of the font size, a spacing-
+    // token height here reserves visibly more room than the icon needs,
+    // showing up as extra dead space above "Bookmarks" (the next section
+    // down, separated from this Item by the same Column's panelGap).
+    height: gearText.implicitHeight
 
     Text {
+      id: gearText
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       text: "⚙"
@@ -275,24 +292,37 @@ Column {
             onBrowseRequested: function(uri) { root.browseRequested(uri) }
           }
         }
-
-        BookmarkForm {
-          visible: groupSection.modelData.name === "" && root.formMode !== ""
-          width: root.width
-          bookmarkStore: root.bookmarkStoreRef
-          editingId: root.formMode === "edit" ? root.formEditingId : ""
-          initialLabel: root._editingBookmark ? root._editingBookmark.label : ""
-          initialHostname: root._editingBookmark ? root._editingBookmark.hostname : ""
-          initialPort: root._editingBookmark ? root._editingBookmark.port : "22"
-          initialUser: root._editingBookmark ? root._editingBookmark.user : ""
-          initialMac: root._editingBookmark ? root._editingBookmark.mac : ""
-          initialGroup: root._editingBookmark ? root._editingBookmark.group : ""
-          initialNotes: root._editingBookmark ? root._editingBookmark.notes : ""
-          initialIcon: root._editingBookmark ? root._editingBookmark.icon : ""
-          onSaved: root.closeForm()
-          onCancelled: root.closeForm()
-        }
       }
+    }
+
+    // Deliberately a SINGLE instance living outside the group Repeater above,
+    // not nested inside a per-group delegate (it used to be, gated on
+    // `groupSection.modelData.name === ""`) -- `groupedBookmarks` builds a
+    // brand-new array/objects on every bookmark mutation (see its own
+    // comment), and Repeater has no stable identity for a plain-array model,
+    // so it fully tears down and rebuilds every group delegate whenever the
+    // bookmark list changes shape (e.g. a group gaining its first member).
+    // A form nested inside one of those delegates got destroyed mid-save
+    // whenever the edited bookmark's own group changed (reported live: after
+    // editing "Juniper" to add its first-ever "Raspberry Pi" group and
+    // clicking Save, the form stayed open and reset to blank instead of
+    // closing) -- hoisting it here means its lifecycle no longer depends on
+    // how many groups exist or which one the edited bookmark belongs to.
+    BookmarkForm {
+      visible: root.formMode !== ""
+      width: root.width
+      bookmarkStore: root.bookmarkStoreRef
+      editingId: root.formMode === "edit" ? root.formEditingId : ""
+      initialLabel: root._editingBookmark ? root._editingBookmark.label : ""
+      initialHostname: root._editingBookmark ? root._editingBookmark.hostname : ""
+      initialPort: root._editingBookmark ? root._editingBookmark.port : "22"
+      initialUser: root._editingBookmark ? root._editingBookmark.user : ""
+      initialMac: root._editingBookmark ? root._editingBookmark.mac : ""
+      initialGroup: root._editingBookmark ? root._editingBookmark.group : ""
+      initialNotes: root._editingBookmark ? root._editingBookmark.notes : ""
+      initialIcon: root._editingBookmark ? root._editingBookmark.icon : ""
+      onSaved: root.closeForm()
+      onCancelled: root.closeForm()
     }
   }
 
