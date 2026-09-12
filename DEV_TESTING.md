@@ -211,13 +211,38 @@ GTK-embedding remote-desktop client, not just Remmina:**
   (`user@realdomain.tld`, matching what the Windows box's own account is
   actually named -- confirmed live with a `user@comcast.net`-style
   Microsoft-account login) rather than a bare local username sidesteps
-  the local default-realm lookup entirely. Forcing `/auth-pkg-list:
-  none,ntlm` also works around it (confirmed via manual testing) but was
-  NOT added to `launchRemoteDesktop` -- the UPN fix alone already unblocked
-  the one real bookmark that needed it, and layering on an auth-mechanism
-  change that wasn't needed risked breaking a connection that had just
-  started working. Revisit only if a FUTURE bookmark with a genuinely bare
-  local username (no @domain) hits this same failure.
+  the local default-realm lookup entirely.
+  **Update (2026-09-12): `/auth-pkg-list:none,ntlm` WAS eventually added**
+  to `launchRemoteDesktop`, once a SECOND real bookmark (Sequoia, same
+  `user@comcast.net`-style login as RedOak, different physical Windows
+  box) hit a live, reported symptom -- "RDP window opens, then closes
+  after a few seconds" -- that didn't reproduce on a manual retest
+  moments later. Root-caused via `/log-level:INFO`: even with a correct
+  UPN, xfreerdp3 STILL tries Kerberos first (using the email domain,
+  e.g. "COMCAST.NET", as the realm), fails with the identical `Cannot
+  find KDC for realm` error every time (a Microsoft-account UPN has no
+  real Kerberos infrastructure behind its email domain either), THEN
+  falls back to NTLM and connects fine regardless -- confirmed via two
+  back-to-back manual `nohup`+`/log-level:INFO` runs (not through the
+  plugin) that both stayed connected (checked via `hyprctl clients`
+  showing a live `xfreerdp` window, `ps` showing the process still
+  running well past when it "should" have closed). That Kerberos-then-
+  fallback dance depends on a DNS SRV lookup for a realm that will never
+  resolve -- cold vs. already-negatively-cached DNS is exactly the kind
+  of timing variance that could push a slow first attempt past some
+  internal FreeRDP timeout on one run and not the next, which lines up
+  with "failed once, can't reproduce" better than any credentials/
+  network explanation. Verified the fix directly: reproduced the bookmark's
+  EXACT real launch (through a temporary debug hook calling
+  `root.launchRemoteDesktop` with Sequoia's real fields, not just a
+  manual argv guess) both with and without the flag -- without it, the
+  Kerberos error appears and the connection takes longer to settle;
+  with `/auth-pkg-list:none,ntlm` added, the Kerberos attempt (and its
+  DNS dependency) never happens at all, connecting in well under a
+  second every time across three separate manual test runs. No
+  regression risk identified: this only forces the SAME auth mechanism
+  (NTLM) that every prior connection was already silently falling back
+  to anyway, just without the wasted attempt first.
 - **`xfreerdp3` defaults to a small fixed-size window** -- reported live,
   the actual remote desktop rendered tiny in a corner of the screen after
   a successful login. `launchRemoteDesktop` now passes `+f` (real
@@ -366,3 +391,380 @@ per-group collapse to the "From ~/.ssh/config" section:**
   directly) to toggle the state and screenshot both the collapsed (header
   only, panel shrinks) and re-expanded (rows back) states -- removed
   before finishing, per this file's own standing convention.
+
+**Export no longer includes stored passwords by default (2026-09-12) --
+the plaintext-in-bookmarks.json tradeoff (chmod 600 there) must not
+silently extend to a second, unhardened file:**
+- `ExportImportPanel.qml` gets a new `includePasswords` bool, defaulting
+  `false` and reset to `false` every time the panel (re)opens -- NOT
+  persisted to SettingsStore, same "a sensitive toggle must not silently
+  stick on" reasoning as BookmarkForm's password-reveal flags. A checkbox
+  next to it ("Include stored passwords") uses the exact same
+  Rectangle+MouseArea idiom as SettingsPanel's `compactCheckbox`/
+  `notifyCheckbox`.
+- `_writeExport` now maps each bookmark through `Object.assign({}, b)` and
+  `delete`s `password`/`rdpPassword` from the copy before serializing,
+  unless `includePasswords` is true -- an omitted key, not a blanked one,
+  so a careless re-import can't mistake an empty string for "no password"
+  and silently clobber a real one already on that alias.
+- The export file also gets the same `chmod 600` treatment as
+  `bookmarks.json`/`~/.ssh/config` (a new `exportChmodProc`), applied
+  regardless of `includePasswords` -- even a passwords-excluded export
+  still lists every hostname/user bookmarked.
+- Verified the strip transform in isolation first via `node -e`
+  (confirmed both keys fully absent from the mapped copy, and the
+  original array's objects untouched -- `Object.assign` shallow-copies,
+  it doesn't mutate). Then verified the real Process/FileView path live:
+  since neither `ydotool` (uinput permission) nor a from-scratch
+  `ydotoold` start could get real clicks working on this machine, drove
+  the full flow through three chained temporary debug hooks (an alias
+  exposing `SettingsPanel`'s instance off `HostList`, another exposing
+  `ExportImportPanel`'s instance off that, and a `debugExportTo(path,
+  includePasswords)` IPC function calling `_writeExport` directly) to
+  export the real live bookmark set twice -- once default (confirmed
+  zero `password`/`rdpPassword` keys anywhere in the file) and once with
+  the checkbox true (confirmed RedOak's actual stored `rdpPassword`
+  appeared verbatim, proving the toggle gates the real secret, not a
+  placeholder) -- both files came back `-rw-------`. Deleted both
+  real-password-containing scratch files with `shred -u` (falling back to
+  `rm -f`) rather than a plain `rm`, and fully reverted all three chained
+  debug hooks afterward -- confirmed via `grep -n debug` across the
+  three touched files coming back empty.
+- One real mid-task mistake, caught immediately: an `Edit` intended to
+  delete two now-redundant debug IPC functions was written with a
+  duplicate-old-string collision and briefly left a duplicated `open()`
+  function inside the same `IpcHandler` block (`omarchy plugin validate`
+  would have caught the resulting duplicate-property-style error on
+  reload regardless, but it was caught by inspection first) -- fixed by
+  re-reading the block and replacing it exactly rather than patching
+  around the mistake.
+
+**Bug-squashing pass (2026-09-12) -- two real bugs found by a full,
+deliberate re-read of every file, both fixed and live-verified:**
+
+- **Connect stayed live on a `configMissing` row.** `connectToHost` runs
+  `ssh <alias>`, which depends entirely on `<alias>` still having a Host
+  block in `~/.ssh/config` -- exactly what's GONE for a configMissing row
+  (its block was hand-deleted out from under the plugin). Clicking Connect
+  there would have ssh try to resolve the literal alias string as a
+  hostname instead of the bookmark's own still-known real hostname,
+  producing a confusing failure with no explanation. Browse/Wake/RDP are
+  unaffected -- all three are built directly from `host.hostname`/`mac`/
+  `rdpPort`/`rdpUser`, never from the alias -- so only Connect needed
+  gating. Fixed in `HostRow.qml` with a new `connectApplicable` property
+  (`!(host && host.configMissing)`), applied via the exact same
+  opacity+enabled/hoverEnabled/cursorShape idiom already used for Wake/RDP
+  dimming, so it stays visually consistent with the rest of the row
+  instead of introducing a new pattern.
+- **Startup race: a bookmark whose block was ALREADY missing before the
+  session started could get permanently stuck.** `_onSshConfigChanged`'s
+  configMissing-synthesis loop only ever runs in reaction to a
+  `~/.ssh/config` file event -- if `bookmarkStore.bookmarks` finished
+  loading AFTER `sshConfigFile`'s own first `onLoaded` (a real, unordered
+  async race between two independent FileViews, already the exact root
+  cause behind `_retagHostSources`'s own existence earlier this session),
+  that bookmark's alias would simply be absent from `root.hosts` --
+  showing "checking" forever (never probed, since `_probeAll` only
+  iterates `root.hosts`) instead of the intended warning, until some
+  UNRELATED future `~/.ssh/config` edit happened to re-trigger the real
+  detection logic. Fixed with a new `_syncMissingBookmarkRows()` in
+  `BarWidget.qml`, called alongside `_retagHostSources()` from the same
+  `onBookmarkLabelsChanged` handler -- mirrors that function's own
+  dual-entry-point fix for the identical race class. Guarded on
+  `root.hosts.length > 0` (same guard `_applyCachedState` already uses)
+  so it never fires before `~/.ssh/config` has loaded at all, which would
+  otherwise flag every bookmark as configMissing for one frame.
+- Verified both together live: added a real bookmark
+  (`ZZDebugConfigMissing`, hostname `203.0.113.1` -- TEST-NET-3, safe/
+  non-routable so no accidental probe traffic), then used a temporary
+  `debugSimulateHandDelete` hook (calling `BookmarkStore._removeBookmarkBlock`
+  directly, NOT `deleteBookmark`, so only the `~/.ssh/config` block
+  vanished while the bookmark's own JSON entry stayed -- an accurate
+  simulation of a real hand-delete) to reproduce the exact scenario
+  without hand-editing the real config file. Screenshot (cropped/zoomed
+  2x for a clear before/after comparison) confirmed the row rendered with
+  a red label, red status dot, and a visibly dimmed/dotted-outline Connect
+  button next to Juniper's normal, crisp one. Cleaned up via the normal
+  `deleteBookmark` path afterward, confirmed zero remaining references to
+  the test label in either `~/.ssh/config` or `bookmarks.json`, then fully
+  reverted all three temporary debug functions (two in `BarWidget.qml`,
+  one in `BookmarkStore.qml`) -- confirmed via `grep -rn debug` across
+  every `.qml` file coming back empty.
+
+**Optimization/performance pass (2026-09-12), immediately after the
+bug-squashing pass above -- same full re-read, different lens:**
+
+- **Applied:** `HostList.qml` had TWO independent `root.hosts.filter(h =>
+  h.source === "config")` passes -- one inside `flatRows`, one as the
+  `~/.ssh/config` Column's own `configHosts` property -- recomputing the
+  identical filter twice on every `root.hosts` change. Hoisted into one
+  shared `readonly property var configHosts` on the root Column,
+  referenced from both places. Zero behavior change, one array pass
+  instead of two.
+- **Applied:** `HostRow.qml`'s two-click delete-confirm logic was
+  duplicated verbatim between `onDeleteKeySeqChanged` (the keyboard path)
+  and the delete button's own `onClicked` (the mouse path) -- not a
+  performance issue, but the same duplicate-logic risk this codebase
+  otherwise takes care to avoid. Extracted into a shared
+  `_triggerDeleteConfirm()`, called from both entry points after each
+  keeps its own distinct applicability guard (keyboard: only the selected
+  row; mouse: any row) -- confirmed this guard difference is why the two
+  couldn't just be merged into one signal handler instead.
+- **Considered, NOT applied -- flagged instead:** `BarWidget.qml`'s
+  `contentLoader` (`Loader { sourceComponent: hostListComponent }`, no
+  `active:` binding) stays instantiated for the plugin's entire lifetime
+  once first opened -- `KeyboardPanel` only hides the window
+  (`visible: open || card.opacity > 0 || ...`), it never tears down its
+  content tree. Since the background probe timer keeps mutating
+  `root.hosts` on its own cadence specifically so the bar icon/badge stay
+  accurate while the popup is closed (by design, see that timer's own
+  comment), the entire `HostList` tree -- `groupedBookmarks`, `flatRows`,
+  every nested `HostRow` delegate's dozen-plus bound properties --
+  recomputes on every such tick EVEN WHILE the popup is closed and
+  invisible. Gating `contentLoader.active` on `root.opened` would fix
+  this, but `KeyboardPanel`'s card fades out over 140ms AFTER `open`
+  flips false (`visible` intentionally lags `open` for the animation) --
+  naively tying `active` to `open` would destroy the content instantly,
+  so the card would visibly fade out over an already-blank hole instead
+  of its actual last-rendered state. Fixing that correctly needs either a
+  ~140ms-delayed deactivation or a signal from `KeyboardPanel` itself for
+  "fully closed, animation included," neither of which this file can see
+  from the outside. At this plugin's realistic scale (single-digit to
+  low-tens of hosts/bookmarks), the wasted recompute is genuinely
+  sub-millisecond and happens at most once per `probeIntervalSec` (60s
+  default) -- not worth the regression risk of a visible glitch on a
+  daily-driver popup for an unmeasurable saving. Left untouched;
+  reconsider only if this plugin's typical host count grows by an order
+  of magnitude or more.
+- **Considered, NOT applied -- correctness-load-bearing, not accidental
+  waste:** `_onSshConfigChanged` re-resolves EVERY alias (`ssh -G`) and
+  re-probes every host on EVERY `~/.ssh/config` change, including this
+  plugin's own writes for a single unrelated bookmark -- looks like
+  obvious redundant work at first glance. It isn't: `BookmarkStore.qml`'s
+  own header comment on `_syncBookmarkFieldsFromConfig` explicitly
+  depends on this blanket re-resolve to pick up a hand-edited Port/
+  HostName for a PLAIN (non-bookmark) `~/.ssh/config` host, which has no
+  other sync mechanism at all. Skipping re-resolution for
+  already-known aliases would silently break live-updating a hand-edited
+  plain host's port/hostname. Left untouched.
+
+**Ping button added (2026-09-12), in front of Connect on every row:**
+- A one-shot `timeout 4 ping -c 1 -W 2 <hostname>` per click, entirely
+  separate from the periodic SSH banner probe -- tests basic ICMP
+  reachability, not "is a real sshd answering." No availability-gate
+  property (unlike xfreerdp3/sshpass/wakeonlan/nautilus above) -- `ping`
+  is a base-install utility on every mainstream Linux distro, same trust
+  tier as `ssh`/`bash`/`timeout` themselves per this file's own header
+  comment.
+- Built from `host.hostname` directly, like Browse/Wake/RDP -- NOT the
+  ssh config alias, like Connect -- so `pingApplicable` only requires a
+  known hostname, deliberately NOT gated on `configMissing` the way
+  `connectApplicable` is: a hand-deleted ~/.ssh/config block breaks
+  alias-based resolution (Connect's problem), but the bookmark's own
+  hostname stays known and pingable regardless.
+- Result parsing: `/time=([\d.]+)\s*ms/` against stdout, rounded to match
+  `latencyText`'s own `Math.round(ms) + "ms"` convention; any non-match
+  (timeout, unreachable, DNS failure) folds into one "timeout" label --
+  same "simple state over granular taxonomy" preference already used for
+  up/down SSH status. Deliberately checked the regex requires the `=`
+  (only present on a real per-reply line, e.g. "time=0.123 ms") so it
+  can't false-positive-match the summary line's unrelated "time 0ms"
+  (elapsed wall-clock time for the whole run, not round-trip time) --
+  confirmed by hand against real `ping` output for both a live host (a
+  "64 bytes from ... time=0.123 ms" reply line) and an unreachable one
+  (TEST-NET-3 203.0.113.1 -- "100% packet loss", no time= line at all).
+- Result lives on the shared `host` object (`BarWidget.pingHost` /
+  `_applyPingResult`, via the same `_patchHost` every other probe already
+  uses) -- NOT local row state, so it survives this delegate being
+  rebuilt by an unrelated bookmark edit, same as `status`/`latencyMs`
+  already do. Never written to `status-cache.json` (`_saveCache` only
+  ever picks specific fields, `pingStatus` isn't one of them) -- purely
+  transient, resets to unset on every shell restart. What IS local row
+  state is how long to keep SHOWING a landed result before reverting the
+  button label back to "Ping" -- `host` is a plain JS object, not a
+  QtObject, so its own fields can't fire QML change signals directly.
+  `HostRow.onHostChanged` (fires whenever `host` itself is reassigned,
+  which happens on every `root.hosts` update for ANY reason) compares
+  against a locally-tracked last-seen value to detect an actual
+  `pingStatus` transition specifically, then shows it
+  for 4 seconds (`pingResultTimer`, same shape as `deleteConfirmTimer`)
+  before the button label reverts to "Ping". The always-passes-through-
+  "pending"-first state sequence means two identical results in a row
+  (e.g. "12ms" twice) still each get their own fresh 4-second window,
+  confirmed by reasoning through the exact three-state sequence
+  ("12ms" -> "pending" -> "12ms" is two real changes, not a no-op).
+- Verified live end-to-end via a temporary `debugPing(alias)` IPC hook
+  (`ydotoold` still can't reach `/dev/uinput` on this machine for a real
+  click, same blocker as earlier this session): pinged a real live host
+  (Mulberry, 192.168.1.10) and confirmed via `console.log` that
+  `_hostByAlias(alias).pingStatus` landed as `"1ms"`/`"2ms"` on separate
+  runs; also confirmed via screenshot that ONLY the pinged row's button
+  showed the live numeric result while every other row's button still
+  read "Ping" (per-row state isolation, not a global flag). One real,
+  useful discovery from this test: a bookmark already showing DOWN (red
+  dot, SSH banner probe failing) still answered ICMP ping successfully --
+  a live example of exactly the diagnostic distinction ("is the box even
+  on the network" vs "is sshd answering") this button exists to provide.
+  Reverted the temporary debug hook afterward -- confirmed via
+  `grep -rn debug` across every `.qml` file coming back empty.
+
+**xfreerdp3 now forced to NTLM-only (2026-09-12)** -- see the updated
+"stock krb5.conf" entry above for the full root-cause story (a SECOND
+real bookmark, Sequoia, hit a live "RDP opens then closes" symptom that
+turned out to be the SAME Kerberos-then-NTLM-fallback dance RedOak
+already had, just with worse DNS-lookup timing on one attempt). Fix:
+`/auth-pkg-list:none,ntlm` added to `launchRemoteDesktop`'s args,
+unconditionally for every RDP launch. Verified via three separate manual
+`nohup`+`/log-level:INFO` runs against the real host (no flag: Kerberos
+error then eventual NTLM connect; `/auth-pkg-list:!kerberos`: did NOT
+actually suppress the Kerberos attempt, same error still appeared --
+`/auth-pkg-list:none,ntlm` is the form that actually works) plus one
+final run through a temporary `debugLaunchRDP(alias)` hook calling the
+real, already-fixed `root.launchRemoteDesktop` with Sequoia's actual
+bookmark fields -- confirmed via `pgrep`/`ps`/`hyprctl clients` that the
+real shipped code path now connects in under a second with zero
+Kerberos-related log lines. Hook reverted afterward.
+
+**Status probe now protocol-aware (2026-09-12)** -- reported live:
+Sequoia (RDP-only, confirmed zero response on port 22 via a direct
+`/dev/tcp` connect test -- not refused, just silent, consistent with no
+OpenSSH Server installed) stayed permanently red/"down" despite RDP
+working fine and Ping succeeding, because `_runTcpProbe` always tested
+the SSH port for an "SSH-" banner regardless of the bookmark's actual
+primary protocol. Fixed: `_runTcpProbe` now looks up the alias's
+bookmark and, if `protocol === "rdp"`, probes `rdpPort` with a plain
+TCP-connect-succeeds check instead of the SSH banner grab (RDP's binary
+handshake has no readable text banner to inspect the way SSH's
+"SSH-2.0-..." string does -- parsing a real RDP negotiation response
+just for a status dot would be real complexity for little practical
+gain, so this deliberately accepts the same simplification this file's
+own header comment describes as the original pre-banner SSH design,
+justified here by the RDP port being a much less commonly
+squatted/multiplexed port than SSH's). `host.port` (the SSH port) is
+completely untouched by this -- it's still written into ~/.ssh/config
+unconditionally regardless of protocol, so Connect/Browse/the
+~/.ssh/config Host block are all unaffected; only the status-dot PROBE
+itself branches. `bannerProbeComponent`'s Process gained an `isRdpProbe`
+bool threaded through to `_applyBannerResult`, which now only requires
+`exitCode === 0` (no banner match) when `isRdpProbe` is true. Verified
+live: opened the popup after this change and confirmed via screenshot
+that both Sequoia AND RedOak (the plugin's only two `protocol: "rdp"`
+bookmarks) now show green, matching their actual RDP reachability,
+while every SSH-protocol bookmark's dot is unaffected.
+
+**RESOLVED: RDP black-screen-with-cursor-only on Sequoia (2026-09-12)** --
+follow-up to the NTLM fix above, which turned out NOT to be this
+symptom's actual cause. Real sequence of what happened, recorded in full
+since it's a good example of chasing the wrong lead first:
+- The NTLM fix was real and worth keeping (removes a genuinely wasted,
+  DNS-latency-dependent Kerberos attempt on every connection), but it did
+  NOT fix the actual reported problem -- after shipping it, the user
+  reported the RDP window still showed nothing.
+- First wrong lead: assumed the earlier "opens then closes" description
+  meant the process/window was dying on its own. Live testing (`ps`,
+  `hyprctl clients`, both through manual `nohup` runs AND through a
+  temporary `debugLaunchRDP` hook calling the real `launchRemoteDesktop`)
+  repeatedly showed the process staying alive and "connected" for
+  30+ seconds without self-terminating -- the user then clarified THEY
+  were the one closing it each time, assuming a black window meant
+  failure. Important process lesson: `hyprctl clients` showing a mapped,
+  "connected" window is NOT the same as confirming anything is actually
+  RENDERING inside it -- this file's own screenshot tool consistently
+  came back 100% solid black for this specific window even when a human
+  looking at the real screen saw partial content (a bordered window, dim
+  wallpaper bleed-through), meaning the screenshot tool could not be
+  trusted to verify this window's content at all. Don't repeat this
+  mistake -- for a window whose content matters, get the user's own eyes
+  on it rather than trusting an automated screenshot that might be
+  silently failing to capture it.
+- Second wrong lead: given the user mentioned Sequoia has three physical
+  monitors (a 4K center + two mismatched 2K sides), hypothesized a
+  resolution-negotiation mismatch against `+f`/`/dynamic-resolution`
+  (which requests a resolution matching the LOCAL 3000x2000 display).
+  Tested by temporarily swapping to a fixed, completely standard
+  `/w:1920 /h:1080` and having the user check the real button --
+  identical black screen. Ruled out cleanly: reverted immediately.
+- **Actual cause, found via one more precise detail from the user**: "I
+  can see the mouse cursor, complete with the Windows loading animation
+  (spinning circle), but nothing else renders." A persistent BUSY/LOADING
+  cursor (not just a static arrow) that never resolves is the specific,
+  well-documented signature of a Windows Remote Desktop Session Host
+  trying (and hanging) to hand off session rendering to a discrete GPU
+  for hardware acceleration -- the RDP cursor channel is independent of
+  the desktop-image compositing path, so it keeps working (and keeps
+  showing Windows' own "I'm busy" cursor state) even while the actual
+  desktop bitmap never gets delivered. This is a SERVER-SIDE Windows/GPU
+  driver issue, not anything under this plugin's or xfreerdp3's control
+  from the client side -- explains why RedOak (presumably no discrete
+  GPU driving physical monitors) never hit this while Sequoia (three real
+  monitors, almost certainly a dGPU) did every time, and why no client
+  flag combination (NTLM forcing, fixed resolution, `-gfx`) ever changed
+  the outcome, since none of them touch server-side session rendering.
+- **Confirmed fixed** by the user directly on Sequoia (Windows 11 Pro):
+  `gpedit.msc` → Computer Configuration → Administrative Templates →
+  Windows Components → Remote Desktop Services → Remote Desktop Session
+  Host → Remote Session Environment → "Use hardware graphics adapters for
+  all Remote Desktop Services sessions" → Disabled, then reboot. (Home
+  edition equivalent, untested but standard: same setting via the
+  `fEnableWddmDriver` DWORD under
+  `HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp`.)
+  No plugin code change was the actual fix here -- documented in
+  README.md's own new "Remote Desktop (RDP)" section (with a
+  Troubleshooting subsection) rather than only here, since this is
+  something a future user could easily hit again on their own hardware
+  and would look for in the user-facing docs, not this dev-only file.
+
+**Audio redirection added (2026-09-12)** -- reported live immediately
+after the GPU fix above: video played fine once rendering was unblocked,
+but with zero audio. Root cause: `launchRemoteDesktop` never passed any
+sound-related flag at all, so the RDPSND audio-redirection channel was
+never requested in the first place -- not a bug in any negotiation, just
+a missing flag. Fixed: bare `/sound` (no sub-options) added to the args,
+letting xfreerdp3 auto-probe for a working local backend rather than
+this plugin hardcoding one. Confirmed via `ldd $(which xfreerdp3) | grep
+pulse` that this build is linked against libpulse, and `pactl info`
+that a working PulseAudio-compatible server (PipeWire's pulse layer) is
+actually running on this machine -- so the backend `/sound` needs is
+present. No error/warning lines appeared for `/sound` in a manual
+`/log-level:INFO` test run. Actual audio output itself needs the user's
+own ears to confirm (not something this file's tooling can verify) --
+pending live confirmation. **Confirmed working live** by the user on
+both RedOak and Sequoia.
+
+**Panel widened again, 510 -> 570 (2026-09-12)** -- same three spots as
+the earlier 460->510 widening (`HostList.qml` width, `BarWidget.qml`'s
+`contentWidth`, `HostRow.qml`'s unused fallback width), prompted by the
+Ping button pushing the row back to feeling crowded. Verified via
+screenshot -- all four buttons (Ping/Connect/RDP/Wake) plus edit/delete/
+browse icons have comfortable spacing with room to spare.
+
+**Ungrouped "Bookmarks" section made collapsible (2026-09-12)**,
+completing what F1 deliberately left out (its own comment called
+ungrouped "never collapsible... has no name to show collapsed"). Turned
+out to be a very small change: `groupSection.isCollapsed` and
+`flatRows`' own equivalent check both had a `group.name !== "" &&` guard
+specifically excluding the ungrouped section from the SAME
+`collapsedGroups` list every named group already uses -- removing that
+guard is the whole fix, since `""` is already a safe, unambiguous
+sentinel value in that list (a real group name can never actually BE ""
+-- `groupField` is trimmed, and an empty value is exactly what routes a
+bookmark into the ungrouped section to begin with, per
+`groupedBookmarks`'s own logic). No new SettingsStore field needed,
+unlike `collapsedConfigHosts` (that one needed a dedicated bool since
+there's only ever one config-hosts section, not a name-keyed list of
+them). Also: the header's ▸/▾ arrow prefix and its MouseArea's
+`enabled:` were both previously gated on `name !== ""` too (only named
+groups got an arrow or a clickable header at all) -- removed both
+gates so the ungrouped header now always shows an arrow and always
+toggles. "+ Add" and "No bookmarks yet." keep their own independent
+visibility rules (+Add always shown regardless of collapse state,
+deliberately -- collapsing is a display convenience, not a way to block
+adding a new bookmark; "No bookmarks yet." now also hides while
+collapsed, matching the config-hosts section's identical treatment of
+its own "No hosts found" message). Verified live via a temporary
+`debugToggleUngroupedCollapse` IPC hook (toggling `""` in and out of
+`collapsedGroups` directly, since real click simulation is still
+unavailable in this environment) -- confirmed via screenshot that
+collapsing hides Sequoia's row while keeping "+ Add" visible and shows
+`▸ Bookmarks (1)`, and that toggling back shows `▾ Bookmarks (1)` with
+the row restored. Hook reverted afterward.

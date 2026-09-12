@@ -34,7 +34,10 @@ Column {
   id: root
 
   // { alias, hostname, port, user, status, lastCheckedAt,
-  //   latencyMs, connected, mac, group, notes, icon }
+  //   latencyMs, connected, mac, group, notes, icon, pingStatus }
+  // (pingStatus: undefined until the user clicks Ping at least once this
+  // session, then "pending" while in flight, then a result string --
+  // never persisted to status-cache.json, see BarWidget._saveCache.)
   // (mac/group/notes/icon only ever present on a bookmark-sourced host --
   // see HostList._displayHostForBookmark, which merges the bookmark's own
   // fields onto the live/synthesized probe object.)
@@ -66,6 +69,15 @@ Column {
   property int deleteKeySeq: 0
   onDeleteKeySeqChanged: {
     if (!root.selected) return
+    root._triggerDeleteConfirm()
+  }
+
+  // Shared by both delete-confirm entry points (this row's own click
+  // handler below, and the keyboard path above) -- they have different
+  // applicability guards (mouse: any row; keyboard: only the selected
+  // row), which is why they can't just be merged into one signal handler,
+  // but the actual two-click-confirm logic itself is identical either way.
+  function _triggerDeleteConfirm() {
     if (root.deleteConfirming) {
       root.deleteConfirming = false
       deleteConfirmTimer.stop()
@@ -77,6 +89,7 @@ Column {
   }
 
   signal connectRequested(string alias)
+  signal pingRequested(string alias)
   signal editRequested(string bookmarkId)
   signal deleteRequested(string bookmarkId)
   signal wakeRequested(string mac)
@@ -84,7 +97,7 @@ Column {
   signal favoriteRequested(string bookmarkId)
   signal remoteDesktopRequested(string protocol, string hostname, string port, string user, string password)
 
-  width: Style.space(510)
+  width: Style.space(570)
   spacing: Style.spacing.xxs
 
   readonly property string notes: root.host && root.host.notes ? root.host.notes : ""
@@ -109,6 +122,65 @@ Column {
     return (ms === null || ms === undefined) ? "—" : Math.round(ms) + "ms"
   }
   readonly property bool showWake: root.editable && root.host && !!root.host.mac && root.wakeonlanAvailable && root.host.status === "down"
+
+  // A configMissing row's `alias` no longer has a matching Host block in
+  // ~/.ssh/config (hand-deleted out from under the plugin) -- `ssh <alias>`
+  // would then have nothing to resolve it against and fail (or, worse,
+  // silently try to connect to a DIFFERENT real host that happens to share
+  // that literal name), even though the bookmark's own known-good
+  // hostname/port/user are sitting right there, unused. Browse/Wake/RDP
+  // are unaffected (they're built from those same host.hostname/mac/
+  // rdpPort/rdpUser fields directly, never from the alias), so only
+  // Connect needs gating here -- the fix (Edit -> Save) re-renders the
+  // block from those same fields, which is exactly why the subtitle
+  // message already says "edit to restore" rather than "reconnecting."
+  readonly property bool connectApplicable: !(root.host && root.host.configMissing)
+
+  // Deliberately NOT gated on configMissing/editable the way Connect is --
+  // ping only ever needs host.hostname, which stays correct even when the
+  // alias's own ~/.ssh/config block is gone (see connectApplicable's own
+  // comment on why Connect specifically breaks there and this doesn't).
+  readonly property bool pingApplicable: !!(root.host && root.host.hostname)
+
+  // Ping's result lives on the shared `host` object (BarWidget.pingHost /
+  // _applyPingResult), the same place status/latencyMs already live --
+  // NOT local row state, so a result survives this delegate being
+  // rebuilt (e.g. by an unrelated bookmark edit rebuilding groupedBookmarks
+  // -- see that property's own header comment) the same way status
+  // already does. What IS local here is how long to keep SHOWING that
+  // result in the button before reverting to the "Ping" label -- host is a
+  // plain JS object, not a QtObject, so its own fields can't fire QML
+  // change signals directly; onHostChanged (below) fires whenever `host`
+  // itself is reassigned (every root.hosts update) and compares against
+  // the last-seen value to detect an actual pingStatus change amongst all
+  // the other reasons `host` gets reassigned.
+  property string _lastPingStatus: ""
+  property bool _pingResultVisible: false
+  readonly property string pingButtonText: {
+    if (!root.host || !root.host.pingStatus) return "Ping"
+    if (root.host.pingStatus === "pending") return "…"
+    return root._pingResultVisible ? root.host.pingStatus : "Ping"
+  }
+  onHostChanged: {
+    var status = root.host ? root.host.pingStatus : ""
+    // The "pending" state a fresh ping always passes through first means
+    // two identical results in a row (e.g. "12ms" twice) still re-trigger
+    // this -- "12ms" -> "pending" -> "12ms" is two real changes, not a
+    // no-op repeat, so a second click always gets its own fresh 4-second
+    // reveal window rather than possibly inheriting whatever was left of
+    // the first click's.
+    if (status && status !== "pending" && status !== root._lastPingStatus) {
+      root._pingResultVisible = true
+      pingResultTimer.restart()
+    }
+    root._lastPingStatus = status || ""
+  }
+  Timer {
+    id: pingResultTimer
+    interval: 4000
+    repeat: false
+    onTriggered: root._pingResultVisible = false
+  }
 
   // Deliberately NOT gated by `editable` -- unlike Wake/Edit/Delete (all
   // bookmark-only write actions), browsing is read-only and equally
@@ -250,16 +322,7 @@ Column {
           anchors.fill: parent
           hoverEnabled: true
           cursorShape: Qt.PointingHandCursor
-          onClicked: {
-            if (root.deleteConfirming) {
-              root.deleteConfirming = false
-              deleteConfirmTimer.stop()
-              root.deleteRequested(root.bookmarkId)
-            } else {
-              root.deleteConfirming = true
-              deleteConfirmTimer.restart()
-            }
-          }
+          onClicked: root._triggerDeleteConfirm()
         }
       }
 
@@ -287,12 +350,44 @@ Column {
         }
       }
 
+      // In front of Connect, deliberately -- ping is a lighter-weight,
+      // read-only reachability check someone would reach for BEFORE
+      // deciding to actually open a session, not after.
+      Rectangle {
+        id: pingButton
+        width: Style.space(56)
+        height: Style.space(22)
+        radius: Style.cornerRadius
+        opacity: root.pingApplicable ? 1.0 : 0.35
+        color: (root.pingApplicable && pingArea.containsMouse) ? Style.hoverFill : "transparent"
+        border.width: Style.normalBorderWidth
+        border.color: Style.normalBorderColor
+
+        Text {
+          anchors.centerIn: parent
+          text: root.pingButtonText
+          color: Color.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        MouseArea {
+          id: pingArea
+          anchors.fill: parent
+          enabled: root.pingApplicable
+          hoverEnabled: root.pingApplicable
+          cursorShape: root.pingApplicable ? Qt.PointingHandCursor : Qt.ArrowCursor
+          onClicked: if (root.host) root.pingRequested(root.host.alias)
+        }
+      }
+
       Rectangle {
         id: connectButton
         width: Style.space(66)
         height: Style.space(22)
         radius: Style.cornerRadius
-        color: connectArea.containsMouse ? Color.accent : Style.normalFill
+        opacity: root.connectApplicable ? 1.0 : 0.35
+        color: (root.connectApplicable && connectArea.containsMouse) ? Color.accent : Style.normalFill
         border.width: Style.normalBorderWidth
         border.color: Style.normalBorderColor
 
@@ -307,8 +402,9 @@ Column {
         MouseArea {
           id: connectArea
           anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
+          enabled: root.connectApplicable
+          hoverEnabled: root.connectApplicable
+          cursorShape: root.connectApplicable ? Qt.PointingHandCursor : Qt.ArrowCursor
           onClicked: if (root.host) root.connectRequested(root.host.alias)
         }
       }

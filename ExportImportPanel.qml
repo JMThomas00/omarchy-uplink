@@ -22,11 +22,21 @@ Item {
 
   property string statusText: ""
   property string _pendingExportPath: ""
+  // Defaults OFF, and NOT persisted to SettingsStore -- reset to off every
+  // time this panel (re)opens, same "don't let a sensitive toggle silently
+  // stick on" reasoning as BookmarkForm's password-reveal flags. A stored
+  // password is already a plaintext-in-bookmarks.json tradeoff the user
+  // explicitly accepted (mitigated there only by chmod 600); export must
+  // not silently extend that same plaintext exposure to a second file
+  // (which may get copied elsewhere, attached, committed, etc.) unless the
+  // user opts in for THIS export, every time.
+  property bool includePasswords: false
 
   onVisibleChanged: if (visible) {
     exportPathField.text = root.defaultPath
     importPathField.text = root.defaultPath
     root.statusText = ""
+    root.includePasswords = false
   }
 
   FileView {
@@ -54,6 +64,15 @@ Item {
     onExited: root._writeExport(root._pendingExportPath)
   }
 
+  // Same permission hardening bookmarks.json and ~/.ssh/config already get
+  // -- applied regardless of includePasswords, since even a
+  // passwords-excluded export still lists every hostname/user this person
+  // has bookmarked.
+  Process {
+    id: exportChmodProc
+    command: []
+  }
+
   function doExport() {
     var path = (exportPathField.text || "").trim() || root.defaultPath
     root._pendingExportPath = path
@@ -69,9 +88,24 @@ Item {
 
   function _writeExport(path) {
     var bookmarks = root.bookmarkStoreRef ? root.bookmarkStoreRef.bookmarks : []
+    // Stripped by default, not just blanked -- an omitted key can't round-
+    // trip back in via a careless re-import the way an empty string could
+    // be mistaken for "no password" and then get silently overwritten.
+    var toWrite = bookmarks
+    if (!root.includePasswords) {
+      toWrite = bookmarks.map(function(b) {
+        var copy = Object.assign({}, b)
+        delete copy.password
+        delete copy.rdpPassword
+        return copy
+      })
+    }
     exportFile.path = path
-    exportFile.setText(JSON.stringify({ bookmarks: bookmarks }, null, 2))
-    root.statusText = "Exported " + bookmarks.length + " bookmark(s) to " + path
+    exportFile.setText(JSON.stringify({ bookmarks: toWrite }, null, 2))
+    exportChmodProc.command = ["chmod", "600", path]
+    exportChmodProc.running = true
+    root.statusText = "Exported " + bookmarks.length + " bookmark(s) to " + path +
+      (root.includePasswords ? " (including stored passwords)" : " (passwords excluded)")
   }
 
   function doImport() {
@@ -123,6 +157,35 @@ Item {
       placeholderText: root.defaultPath
       verticalPadding: Style.spacing.controlPaddingY
       onAccepted: root.doExport()
+    }
+
+    Row {
+      spacing: Style.spacing.controlGap
+
+      Rectangle {
+        id: includePasswordsCheckbox
+        width: Style.space(16)
+        height: Style.space(16)
+        radius: Style.space(3)
+        border.width: Style.normalBorderWidth
+        border.color: Style.normalBorderColor
+        color: root.includePasswords ? Color.accent : "transparent"
+        anchors.verticalCenter: parent.verticalCenter
+
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.includePasswords = !root.includePasswords
+        }
+      }
+
+      Text {
+        text: "Include stored passwords"
+        color: Color.foreground
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        anchors.verticalCenter: parent.verticalCenter
+      }
     }
 
     Row {

@@ -54,11 +54,12 @@ Column {
   property bool remoteDesktopAvailable: true
 
   signal connectRequested(string alias)
+  signal pingRequested(string alias)
   signal wakeRequested(string mac)
   signal browseRequested(string uri)
   signal remoteDesktopRequested(string protocol, string hostname, string port, string user, string password)
 
-  width: Style.space(510)
+  width: Style.space(570)
   spacing: Style.spacing.panelGap
 
   // "" = closed, "add" = new bookmark, "edit" = editing formEditingId
@@ -159,16 +160,23 @@ Column {
   property string selectedRowKey: ""
   property int _deleteKeySeq: 0
 
+  // Single source of truth for "which of root.hosts came from a plain
+  // ~/.ssh/config entry" -- both flatRows below and the ~/.ssh/config
+  // Column's own header/Repeater/count (further down this file) used to
+  // each run this exact same filter independently, recomputing it twice
+  // on every root.hosts change for no reason other than not sharing it.
+  readonly property var configHosts: root.hosts.filter(function(h) { return h.source === "config" })
+
   // Built from the exact same filtering the two Repeaters below actually
-  // render (groupedBookmarks + F1's per-group collapse state, then the
-  // configHosts filter + its own collapse state) -- can never drift from
-  // what's on screen since it isn't a separate parallel computation.
+  // render (groupedBookmarks + F1's per-group collapse state, then
+  // configHosts + its own collapse state) -- can never drift from what's
+  // on screen since it isn't a separate parallel computation.
   readonly property var flatRows: {
     var rows = []
     var groups = root.groupedBookmarks
     for (var g = 0; g < groups.length; g++) {
       var group = groups[g]
-      var collapsed = group.name !== "" && root.settingsStoreRef && root.settingsStoreRef.collapsedGroups.indexOf(group.name) !== -1
+      var collapsed = root.settingsStoreRef && root.settingsStoreRef.collapsedGroups.indexOf(group.name) !== -1
       if (collapsed) continue
       for (var i = 0; i < group.bookmarks.length; i++) {
         rows.push({ key: "bm:" + group.bookmarks[i].id, alias: group.bookmarks[i].label })
@@ -176,9 +184,8 @@ Column {
     }
     var configCollapsed = root.settingsStoreRef && root.settingsStoreRef.collapsedConfigHosts
     if (!configCollapsed) {
-      var configHosts = root.hosts.filter(function(h) { return h.source === "config" })
-      for (var c = 0; c < configHosts.length; c++) {
-        rows.push({ key: "cfg:" + configHosts[c].alias, alias: configHosts[c].alias })
+      for (var c = 0; c < root.configHosts.length; c++) {
+        rows.push({ key: "cfg:" + root.configHosts[c].alias, alias: root.configHosts[c].alias })
       }
     }
     return rows
@@ -316,18 +323,22 @@ Column {
         width: root.width
         spacing: Style.spacing.rowGap
 
-        // Ungrouped ("") is never collapsible -- it's the default landing
-        // spot for every new bookmark and has no name to show collapsed,
-        // matching the existing name === "" gating already used for
-        // "+Add"/"No bookmarks yet" on this same header.
-        readonly property bool isCollapsed: groupSection.modelData.name !== "" && root.settingsStoreRef && root.settingsStoreRef.collapsedGroups.indexOf(groupSection.modelData.name) !== -1
+        // Ungrouped ("") is collapsible too, same as any named group --
+        // reuses the SAME collapsedGroups list rather than a separate
+        // flag: "" is a safe, distinct sentinel here since a real group
+        // name can never actually BE "" (groupField is trimmed, and an
+        // empty value is exactly what makes a bookmark land in this
+        // ungrouped section in the first place, per groupedBookmarks
+        // above) -- so "" in the list unambiguously means "this specific
+        // section," never colliding with any real group's own name.
+        readonly property bool isCollapsed: root.settingsStoreRef && root.settingsStoreRef.collapsedGroups.indexOf(groupSection.modelData.name) !== -1
 
         Row {
           width: parent.width
           spacing: Style.spacing.controlGap
 
           Text {
-            text: (groupSection.modelData.name !== "" ? (groupSection.isCollapsed ? "▸ " : "▾ ") : "") + (groupSection.modelData.name || "Bookmarks") + " (" + groupSection.modelData.bookmarks.length + ")"
+            text: (groupSection.isCollapsed ? "▸ " : "▾ ") + (groupSection.modelData.name || "Bookmarks") + " (" + groupSection.modelData.bookmarks.length + ")"
             color: Qt.darker(Color.foreground, 1.2)
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
@@ -336,7 +347,6 @@ Column {
             MouseArea {
               anchors.fill: parent
               anchors.margins: -Style.space(4)
-              enabled: groupSection.modelData.name !== ""
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onClicked: {
@@ -348,6 +358,11 @@ Column {
             }
           }
 
+          // "+ Add" stays visible regardless of the ungrouped section's own
+          // collapse state, deliberately -- collapsing is a display
+          // convenience, not a way to block adding a new (ungrouped-by-
+          // default) bookmark. Still only ever shown on the ungrouped
+          // header, same as before.
           Text {
             visible: groupSection.modelData.name === "" && root.formMode !== "add"
             text: "+ Add"
@@ -367,7 +382,7 @@ Column {
         }
 
         Text {
-          visible: groupSection.modelData.name === "" && groupSection.modelData.bookmarks.length === 0
+          visible: !groupSection.isCollapsed && groupSection.modelData.name === "" && groupSection.modelData.bookmarks.length === 0
           width: parent.width
           text: "No bookmarks yet."
           color: Qt.darker(Color.foreground, 1.4)
@@ -397,6 +412,7 @@ Column {
             selected: root.selectedRowKey === ("bm:" + modelData.id)
             deleteKeySeq: root._deleteKeySeq
             onConnectRequested: function(alias) { root.connectRequested(alias) }
+            onPingRequested: function(alias) { root.pingRequested(alias) }
             onEditRequested: function(bookmarkId) { root.openEditForm(bookmarkId) }
             onDeleteRequested: function(bookmarkId) { if (root.bookmarkStoreRef) root.bookmarkStoreRef.deleteBookmark(bookmarkId) }
             onWakeRequested: function(mac) { root.wakeRequested(mac) }
@@ -452,7 +468,6 @@ Column {
     width: parent.width
     spacing: Style.spacing.rowGap
 
-    readonly property var configHosts: root.hosts.filter(function(h) { return h.source === "config"; })
     // Mirrors F1's per-group collapse (groupSection.isCollapsed above) but
     // as a single bool in SettingsStore rather than a name in a list --
     // there's only ever one config-hosts section, not one per group name.
@@ -463,7 +478,7 @@ Column {
       spacing: Style.spacing.controlGap
 
       Text {
-        text: (configSection.isCollapsed ? "▸ " : "▾ ") + "From ~/.ssh/config (" + configSection.configHosts.length + ")"
+        text: (configSection.isCollapsed ? "▸ " : "▾ ") + "From ~/.ssh/config (" + root.configHosts.length + ")"
         color: Qt.darker(Color.foreground, 1.2)
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
@@ -482,7 +497,7 @@ Column {
     }
 
     Text {
-      visible: !configSection.isCollapsed && configSection.configHosts.length === 0
+      visible: !configSection.isCollapsed && root.configHosts.length === 0
       width: parent.width
       text: "No hosts found in ~/.ssh/config"
       color: Qt.darker(Color.foreground, 1.4)
@@ -492,7 +507,7 @@ Column {
     }
 
     Repeater {
-      model: configSection.isCollapsed ? [] : configSection.configHosts
+      model: configSection.isCollapsed ? [] : root.configHosts
 
       delegate: HostRow {
         width: root.width
@@ -503,6 +518,7 @@ Column {
         dotColor: root.statusColorFor ? root.statusColorFor(modelData.status) : Color.muted
         selected: root.selectedRowKey === ("cfg:" + modelData.alias)
         onConnectRequested: function(alias) { root.connectRequested(alias) }
+        onPingRequested: function(alias) { root.pingRequested(alias) }
         // Deliberately NOT the bookmark delegate's handlers (bookmarkId is
         // always "" here) -- rename opens the minimal alias-only form
         // below, delete goes straight to BookmarkStore's plain-host path.

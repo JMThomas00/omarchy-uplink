@@ -88,7 +88,7 @@ BarWidget {
   // under "From ~/.ssh/config" (which filters root.hosts by the frozen,
   // wrong source tag) after a restart. This handler re-tags in place
   // whenever bookmarkLabels changes, independent of any config-file event.
-  onBookmarkLabelsChanged: root._retagHostSources()
+  onBookmarkLabelsChanged: { root._retagHostSources(); root._syncMissingBookmarkRows() }
 
   function _retagHostSources() {
     root.hosts = root.hosts.map(function(h) {
@@ -96,6 +96,46 @@ BarWidget {
       if (h.source === source) return h
       return Object.assign({}, h, { source: source })
     })
+  }
+
+  // Same race class as _retagHostSources above, for the OTHER half of
+  // _onSshConfigChanged's job: that function's configMissing-synthesis loop
+  // (a bookmark whose Host block was hand-deleted, so its alias never
+  // reaches ssh -G at all) only ever runs in reaction to a ~/.ssh/config
+  // file event. If bookmarkStore.bookmarks finishes loading AFTER
+  // sshConfigFile's own first onLoaded, a bookmark whose block was ALREADY
+  // missing before this session even started never gets its one
+  // synthesized row -- it's simply absent from root.hosts, so it shows
+  // "checking" forever (never probed, since _probeAll only iterates
+  // root.hosts) instead of the intended "config entry missing" warning,
+  // until some UNRELATED future ~/.ssh/config edit happens to re-trigger
+  // _onSshConfigChanged. Guarded on root.hosts.length > 0 (mirrors
+  // _applyCachedState's own identical guard) -- if ~/.ssh/config hasn't
+  // loaded at all yet, _onSshConfigChanged is still to come and will
+  // compute the correct state for every bookmark itself; running this
+  // first would incorrectly flag every bookmark as configMissing for one
+  // frame.
+  function _syncMissingBookmarkRows() {
+    if (root.hosts.length === 0) return
+    var existingAliases = {}
+    for (var i = 0; i < root.hosts.length; i++) existingAliases[root.hosts[i].alias] = true
+    var additions = []
+    var bookmarks = bookmarkStore.bookmarks
+    for (var b = 0; b < bookmarks.length; b++) {
+      var bm = bookmarks[b]
+      if (existingAliases[bm.label]) continue
+      additions.push({
+        alias: bm.label,
+        hostname: bm.hostname,
+        port: bm.port,
+        user: bm.user,
+        status: "down",
+        lastCheckedAt: Date.now(),
+        source: "bookmark",
+        configMissing: true
+      })
+    }
+    if (additions.length > 0) root.hosts = root.hosts.concat(additions)
   }
 
   readonly property bool anyHostDown: root.hosts.some(function(h) { return h.status === "down" })
@@ -254,12 +294,16 @@ BarWidget {
       // could; it can only read properties living on the proc instance,
       // exactly like hostAlias/capturedText already do.
       property double startedAtMs: 0
+      // True for a bookmark whose primary protocol is RDP, not SSH -- see
+      // _runTcpProbe's own comment on why this changes both the command
+      // AND what counts as "confirmed" below.
+      property bool isRdpProbe: false
       stdout: StdioCollector {
         waitForEnd: true
         onStreamFinished: proc.capturedText = text
       }
       onExited: function(exitCode, exitStatus) {
-        root._applyBannerResult(proc.hostAlias, exitCode, proc.capturedText, Date.now() - proc.startedAtMs)
+        root._applyBannerResult(proc.hostAlias, exitCode, proc.capturedText, proc.isRdpProbe, Date.now() - proc.startedAtMs)
         proc.destroy()
       }
     }
@@ -268,34 +312,63 @@ BarWidget {
   function _runTcpProbe(alias) {
     var host = root._hostByAlias(alias)
     if (!host || !host.hostname) return
-    // `&&` means dd only ever runs once the TCP connect itself succeeds --
-    // a refused/timed-out connect leaves bash exiting non-zero with no
-    // output, never reaching dd. `dd bs=64 count=1` (NOT `head -c 64`) is
-    // deliberate: dd's default (no iflag=fullblock) does exactly one read()
-    // syscall and returns whatever it got, while `head -c N` keeps reading
-    // until it has accumulated the full N bytes or hits EOF -- confirmed
-    // live this is a real distinction, not a style choice: a short banner
-    // ("SSH-2.0-Go\r\n", 12 bytes, from a Forgejo instance's embedded Go SSH
-    // server) sends its identification string once and then waits for the
-    // client's own, so `head -c 64` never got its requested 64 bytes and
-    // hung until the outer `timeout 3` killed it with zero output every
-    // time -- misreporting a live, reachable SSH server as down. `dd`
-    // returns as soon as that single initial packet arrives (confirmed:
-    // both the 12-byte Forgejo banner and OpenSSH's ~40-byte one return in
-    // well under 100ms), which is also the behaviorally correct read here:
-    // a real sshd sends its identification string immediately per RFC 4253
-    // and nothing else until the client replies, so one read is *all*
-    // there ever is to get non-interactively -- `timeout 3` still bounds
-    // the whole thing generously for a slow LAN hop.
-    var cmd = ["timeout", "3", "bash", "-c",
-      "exec 3<>/dev/tcp/" + host.hostname + "/" + host.port + " && dd bs=64 count=1 <&3 2>/dev/null"]
-    var proc = bannerProbeComponent.createObject(root, { command: cmd, hostAlias: alias, startedAtMs: Date.now() })
+    // A bookmark whose primary protocol is RDP needs a different probe
+    // entirely -- reported live: Sequoia (an RDP-only Windows box, no
+    // SSH server at all) stayed permanently red despite RDP working fine
+    // and ping succeeding, because this probe always tested the SSH port
+    // for an "SSH-" banner regardless of which protocol the bookmark
+    // actually uses. `host.port` here is still always the SSH port (the
+    // ~/.ssh/config block is written unconditionally regardless of
+    // protocol, so Connect/Browse keep working either way) -- only the
+    // STATUS PROBE itself needs to target rdpPort instead for these.
+    var bookmark = bookmarkStore.bookmarks.filter(function(b) { return b.label === alias })[0]
+    var isRdpPrimary = !!(bookmark && bookmark.protocol === "rdp")
+    var cmd
+    if (isRdpPrimary) {
+      // RDP speaks a binary negotiation, not a readable text identification
+      // string the way SSH's "SSH-2.0-..." banner is -- parsing a real RDP
+      // handshake response just to confirm "is this actually RDP" would be
+      // real complexity for a status dot. A plain TCP-connect-succeeds
+      // check is the same simplification this file's own header comment
+      // describes as the ORIGINAL v1 design for SSH, before that was
+      // refined specifically to distinguish a real sshd from any other
+      // listener -- accepted here since something else squatting on the
+      // RDP-specific port is a much rarer false positive in practice than
+      // on a commonly-multiplexed port like SSH's.
+      var rdpPort = (bookmark.rdpPort || "3389")
+      cmd = ["timeout", "3", "bash", "-c", "echo > /dev/tcp/" + host.hostname + "/" + rdpPort]
+    } else {
+      // `&&` means dd only ever runs once the TCP connect itself succeeds --
+      // a refused/timed-out connect leaves bash exiting non-zero with no
+      // output, never reaching dd. `dd bs=64 count=1` (NOT `head -c 64`) is
+      // deliberate: dd's default (no iflag=fullblock) does exactly one read()
+      // syscall and returns whatever it got, while `head -c N` keeps reading
+      // until it has accumulated the full N bytes or hits EOF -- confirmed
+      // live this is a real distinction, not a style choice: a short banner
+      // ("SSH-2.0-Go\r\n", 12 bytes, from a Forgejo instance's embedded Go SSH
+      // server) sends its identification string once and then waits for the
+      // client's own, so `head -c 64` never got its requested 64 bytes and
+      // hung until the outer `timeout 3` killed it with zero output every
+      // time -- misreporting a live, reachable SSH server as down. `dd`
+      // returns as soon as that single initial packet arrives (confirmed:
+      // both the 12-byte Forgejo banner and OpenSSH's ~40-byte one return in
+      // well under 100ms), which is also the behaviorally correct read here:
+      // a real sshd sends its identification string immediately per RFC 4253
+      // and nothing else until the client replies, so one read is *all*
+      // there ever is to get non-interactively -- `timeout 3` still bounds
+      // the whole thing generously for a slow LAN hop.
+      cmd = ["timeout", "3", "bash", "-c",
+        "exec 3<>/dev/tcp/" + host.hostname + "/" + host.port + " && dd bs=64 count=1 <&3 2>/dev/null"]
+    }
+    var proc = bannerProbeComponent.createObject(root, { command: cmd, hostAlias: alias, startedAtMs: Date.now(), isRdpProbe: isRdpPrimary })
     proc.running = true
   }
 
-  function _applyBannerResult(alias, exitCode, raw, elapsedMs) {
+  function _applyBannerResult(alias, exitCode, raw, isRdpProbe, elapsedMs) {
     var now = Date.now()
-    var confirmed = exitCode === 0 && String(raw || "").indexOf("SSH-") === 0
+    // An RDP probe only ever checked "did the TCP connect succeed" (no
+    // banner to inspect) -- exit code alone is the full signal there.
+    var confirmed = isRdpProbe ? (exitCode === 0) : (exitCode === 0 && String(raw || "").indexOf("SSH-") === 0)
     // Captured BEFORE _patchHost mutates root.hosts below -- _hostByAlias
     // reads root.hosts, so this MUST run first or it'd see the just-applied
     // new status instead of the real previous one.
@@ -605,8 +678,39 @@ BarWidget {
       // documented toggle (Ctrl+Alt+Enter) rather than trapping the user
       // in it; /dynamic-resolution means toggling out to a resizable
       // window and resizing it live-resizes the remote session too,
-      // instead of just scaling/black-bars.
-      "+f", "/dynamic-resolution"]
+      // instead of just scaling/black-bars. (A fixed 1920x1080 was tried
+      // as a live diagnostic for Sequoia's black-screen-with-cursor-only
+      // symptom -- ruled OUT as the cause: identical black screen at a
+      // completely standard resolution. See DEV_TESTING.md -- this looks
+      // like a server-side Windows/GPU RDS issue, not a client resolution
+      // mismatch, so reverted to the normal fullscreen behavior.)
+      "+f", "/dynamic-resolution",
+      // Forces NTLM, skipping xfreerdp3's own default Kerberos attempt
+      // entirely. A UPN-style rdpUser (a Microsoft Account login like
+      // "j.m.thomas@comcast.net", not a real domain-joined AD account)
+      // has no actual Kerberos realm behind its email domain -- confirmed
+      // live against two separate real Windows boxes (RedOak, Sequoia)
+      // via /log-level:INFO: xfreerdp3 always tries Kerberos first,
+      // fails with "Cannot find KDC for realm COMCAST.NET" (a DNS SRV
+      // lookup for a realm that was never going to exist), THEN falls
+      // back to NTLM and connects fine regardless -- so this was never a
+      // real auth failure, just wasted, DNS-latency-dependent time on
+      // every single connection. That latency dependency is exactly the
+      // kind of thing that can vary run to run (cold vs. cached negative
+      // DNS lookup) -- plausible root cause for a real reported symptom
+      // (Sequoia's RDP window opening then closing after a few seconds on
+      // one attempt, connecting fine on the next). Skipping Kerberos
+      // outright removes that variability rather than just tolerating it.
+      "/auth-pkg-list:none,ntlm",
+      // Without this, the RDPSND audio-redirection channel is never
+      // requested at all -- reported live: video played fine (the GPU/
+      // rendering fix above unblocked that) but with zero audio, on a
+      // bookmark that had never passed any sound-related flag. Bare
+      // `/sound` (no sub-options) lets xfreerdp3 auto-pick a working
+      // local backend rather than hardcoding one -- this machine could be
+      // PipeWire or PulseAudio depending on setup, and xfreerdp3 already
+      // knows how to probe for whichever is actually running.
+      "/sound"]
     // Without /u:, xfreerdp3 silently defaults to the LOCAL LINUX
     // username (logged as "No user name set. - Using login name: <linux
     // user>") and only prompts for Domain/Password -- never for username,
@@ -637,6 +741,60 @@ BarWidget {
     var proc = remoteDesktopProcComponent.createObject(root, { command: command })
     proc.exited.connect(function() { proc.destroy() })
     proc.running = true
+  }
+
+  // ------------------------------------------------------------------ ping
+  //
+  // Deliberately NOT gated behind an availability check the way xfreerdp3/
+  // sshpass/wakeonlan/nautilus are above -- `ping` (iputils) is a base
+  // system utility on every mainstream Linux distro including this one,
+  // same trust level as ssh/bash/timeout per this file's own header
+  // comment. A one-shot, user-requested ICMP echo test, entirely separate
+  // from the periodic SSH banner probe -- and, unlike Connect, built from
+  // host.hostname directly rather than the ssh config alias, so it still
+  // works on a configMissing row (the bookmark's own known-good hostname
+  // is untouched by a hand-deleted ~/.ssh/config block; only the alias's
+  // Host block is gone).
+  Component {
+    id: pingProcComponent
+    Process {
+      id: proc
+      property string hostAlias: ""
+      property string capturedText: ""
+      stdout: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: proc.capturedText = text
+      }
+      onExited: function(exitCode, exitStatus) {
+        root._applyPingResult(proc.hostAlias, proc.capturedText)
+        proc.destroy()
+      }
+    }
+  }
+
+  function pingHost(alias) {
+    var host = root._hostByAlias(alias)
+    if (!host || !host.hostname) return
+    root._patchHost(alias, { pingStatus: "pending" })
+    // `timeout 4` guards against a slow/hanging DNS lookup for a hostname
+    // target -- `-W 2` only bounds the wait for a reply AFTER the ping
+    // itself gets a packet out, not the resolution step before it. Same
+    // defensive-wrapping convention as the banner probe's own
+    // `timeout 3 bash -c ...`.
+    var cmd = ["timeout", "4", "ping", "-c", "1", "-W", "2", host.hostname]
+    var proc = pingProcComponent.createObject(root, { command: cmd, hostAlias: alias })
+    proc.running = true
+  }
+
+  // Matches latencyText's own `Math.round(ms) + "ms"` formatting for
+  // consistency. Any non-match (timeout, unreachable, unknown host) folds
+  // into a single "timeout" result -- same "one simple state, not a
+  // granular taxonomy of failure reasons" preference already used for the
+  // up/down SSH status.
+  function _applyPingResult(alias, raw) {
+    var m = String(raw || "").match(/time=([\d.]+)\s*ms/)
+    var result = m ? Math.round(parseFloat(m[1])) + "ms" : "timeout"
+    root._patchHost(alias, { pingStatus: result })
   }
 
   // ------------------------------------------------------- state/cache
@@ -875,7 +1033,7 @@ BarWidget {
     bar: root.bar
     centerOnBar: root.barSection === "center"
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(510))
+    contentWidth: panel.fittedContentWidth(Style.space(570))
     contentHeight: panel.fittedContentHeight(
       contentLoader.item ? contentLoader.item.implicitHeight : Style.space(120),
       Style.space(560))
@@ -948,6 +1106,7 @@ BarWidget {
           onWakeRequested: function(mac) { root.wakeHost(mac) }
           onBrowseRequested: function(uri) { root.openFileManager(uri) }
           onRemoteDesktopRequested: function(protocol, hostname, port, user, password) { root.launchRemoteDesktop(protocol, hostname, port, user, password) }
+          onPingRequested: function(alias) { root.pingHost(alias) }
         }
       }
     }

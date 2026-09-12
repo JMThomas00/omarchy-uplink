@@ -43,6 +43,14 @@ connections too, right alongside them.
 - **Wake-on-LAN** -- save a MAC address on a bookmark and wake a sleeping
   host with one click (needs `wakeonlan` installed; the button just won't
   show if it isn't).
+- **Ping** -- a one-click ICMP reachability check, separate from the SSH
+  status dot. Useful for a host that's on the network but doesn't run SSH
+  (a Windows RDP-only box, for instance) -- the result (round-trip time,
+  or "timeout") shows right in the button for a few seconds.
+- **Remote Desktop (RDP)**, via `xfreerdp3` -- set a bookmark's protocol to
+  RDP and an "RDP" button appears next to Connect. Needs `freerdp`
+  installed (`sudo pacman -S freerdp`); the button just doesn't appear
+  otherwise. See its own section below.
 - **Export/import your bookmarks** as a plain JSON file.
 - **Configurable probe cadence and a compact row mode**, both in a small
   in-popup settings panel.
@@ -149,6 +157,70 @@ them, or use each bookmark's delete button before uninstalling.
 - **MAC address** (under "▸ Advanced" in the form) enables the Wake button
   for that host once it's down -- requires `wakeonlan` installed
   (`sudo pacman -S wakeonlan`); the button simply doesn't appear otherwise.
+
+### Remote Desktop (RDP)
+
+- Set a bookmark's **Connect via** to **RDP** in the add/edit form to
+  reveal an RDP-specific **Port** (default 3389) and **User** field --
+  deliberately separate from the SSH Port/User above, since they're two
+  independent services on two different ports by default, and an RDP
+  username (a real Windows account, e.g. a Microsoft-account login like
+  `you@example.com`) isn't shaped like a valid SSH username.
+- **Stored password** (optional, next to RDP User): with one saved, the
+  RDP button connects silently in the background -- no terminal window,
+  no prompt -- and closes cleanly whenever the session ends (you close
+  it, the remote machine shuts down, or the connection drops), since the
+  RDP window itself is the only thing that was ever running. Without a
+  stored password, it opens in a terminal instead, for an interactive
+  Domain/Username/Password prompt.
+- **Plaintext storage, by design, not an oversight** -- like the SSH
+  password field, a stored RDP password lives in
+  `~/.config/uplink/bookmarks.json` as plaintext (permission-hardened to
+  `600`, but not encrypted -- anything running as your own user can still
+  read it). Only use this if you're comfortable with that tradeoff on
+  your own machine. **Export deliberately excludes both password fields
+  by default** -- check "Include stored passwords" in Export/Import if
+  you actually want them in an exported file, since that file gets
+  copied around with none of `bookmarks.json`'s own permission hardening.
+- The status dot for an RDP-protocol bookmark checks the **RDP port**,
+  not SSH -- so a Windows box with no SSH server at all still shows
+  correctly green/red based on whether RDP itself is actually reachable.
+
+#### Troubleshooting: black screen with only a moving cursor
+
+**Symptom:** the RDP window opens and connects (you can move the mouse,
+and it may even show a Windows "loading" cursor animation), but the
+desktop or login screen itself never renders -- just solid black.
+
+**Cause:** this is a well-known Windows issue on machines with a
+discrete/dedicated GPU (NVIDIA or AMD) driving real physical monitors --
+confirmed live on exactly this kind of machine (three real monitors, a
+mixed 4K/2K setup). Windows tries to hand the Remote Desktop session off
+to that same GPU for hardware-accelerated rendering, and on many driver
+versions that handoff hangs silently. The cursor still renders because
+it's drawn through a separate, independent channel that doesn't depend
+on the same GPU compositing path as the desktop image -- which is
+exactly why you can see it move (and even see its loading-spinner state)
+while everything else stays black.
+
+**Fix** -- on the Windows machine itself (not this plugin), disable
+hardware-accelerated rendering for Remote Desktop sessions specifically:
+
+- **Windows 11 Pro/Enterprise/Education:** open `gpedit.msc` →
+  Computer Configuration → Administrative Templates → Windows Components
+  → Remote Desktop Services → Remote Desktop Session Host → Remote
+  Session Environment → set **"Use hardware graphics adapters for all
+  Remote Desktop Services sessions"** to **Disabled**. Reboot.
+- **Windows 11 Home** (no `gpedit.msc`): the same setting via registry --
+  open `regedit`, go to
+  `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp`,
+  add a new **DWORD (32-bit)** value named `fEnableWddmDriver` set to
+  `0`. Reboot.
+- Worth updating the GPU driver at the same time -- some driver versions
+  have specific known bugs here.
+
+This is a one-time fix per machine; it doesn't need repeating after the
+first successful connection.
 
 ### Settings
 

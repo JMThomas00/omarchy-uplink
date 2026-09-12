@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jmthomas00.uplink",
   "name": "Uplink",
-  "version": "2.4.0",
+  "version": "2.8.0",
   "author": "Jordan Thomas (JMThomas00)",
   "license": "MIT",
   "description": "Live reachability and one-click SSH/RDP launch for every host in ~/.ssh/config -- plus save-your-own bookmarked connections.",
