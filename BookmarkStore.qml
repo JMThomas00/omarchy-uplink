@@ -50,6 +50,11 @@ Item {
   // backup under this new name capturing today's state, which is a more
   // useful safety net anyway.
   readonly property string sshConfigBackupPath: root.home + "/.ssh/config.pre-uplink.bak"
+  // Rolling per-write backups, kept OUTSIDE ~/.ssh/ (unlike the one-time
+  // snapshot above) so they don't clutter a directory the user hand-
+  // maintains -- pruned to the newest N in _pruneBackups.
+  readonly property string backupsDir: root.configDir + "/backups"
+  readonly property int _maxBackups: 15
 
   property var bookmarks: [] // [{id, label, hostname, port, user, mac, group, notes, icon}]
   property bool bookmarksLoaded: false
@@ -88,7 +93,30 @@ Item {
       mac: b.mac || "",
       group: b.group || "",
       notes: b.notes || "",
-      icon: b.icon || ""
+      icon: b.icon || "",
+      favorite: !!b.favorite,
+      protocol: (b.protocol === "rdp" || b.protocol === "vnc") ? b.protocol : "ssh",
+      // Independent of `port` (the SSH port, written into ~/.ssh/config) --
+      // deliberately, see BookmarkForm's own comment on why one shared port
+      // field can't represent both SSH and RDP on the same host. JSON-only,
+      // like mac/group/notes/icon.
+      rdpPort: b.rdpPort || "3389",
+      // Independent of `user` for the same reason, plus a real, distinct
+      // constraint: `user` is validated against _userRe (POSIX-username-
+      // shaped, no spaces) since it's written into ~/.ssh/config, but a
+      // real Windows account name can be "Jordan Thomas" -- reusing `user`
+      // for RDP would either reject that outright or, worse, let a
+      // space-containing value slip into the SSH config write path.
+      rdpUser: b.rdpUser || "",
+      // Plaintext, by explicit user request (2026-09-12) -- this file gets
+      // chmod 600 the same as ~/.ssh/config already does (see
+      // bookmarksChmodTimer below), but that's permission hardening, not
+      // encryption; anything running as this user can still read it.
+      // Deliberately NOT trimmed (unlike every other text field here) --
+      // a real password could legitimately have leading/trailing
+      // whitespace, and silently stripping it would corrupt it.
+      password: b.password || "",
+      rdpPassword: b.rdpPassword || ""
     }
   }
 
@@ -102,13 +130,25 @@ Item {
     } catch (e) {
       root.bookmarks = []
     }
+    // Covers the case sshConfigWriter's FileView already finished its own
+    // first load (and ran _syncBookmarkFieldsFromConfig against it) BEFORE
+    // this independently-async load populated root.bookmarks -- the exact
+    // same race class BarWidget.qml already had to solve once for its own
+    // bookmarkLabels/hosts ordering. Without this, a bookmark hand-edited
+    // in ~/.ssh/config before this session even started would never get
+    // its one chance to self-heal, since every later call only fires on a
+    // genuine NEW external change.
+    root._syncBookmarkFieldsFromConfig(root._sshConfigText)
   }
 
   Timer {
     id: bookmarksSaveTimer
     interval: 300
     repeat: false
-    onTriggered: bookmarksFile.setText(JSON.stringify({ bookmarks: root.bookmarks }))
+    onTriggered: {
+      bookmarksFile.setText(JSON.stringify({ bookmarks: root.bookmarks }))
+      bookmarksChmodTimer.restart()
+    }
   }
 
   function _scheduleSave() {
@@ -116,9 +156,27 @@ Item {
     bookmarksSaveTimer.restart()
   }
 
+  // bookmarks.json can now hold plaintext passwords (2026-09-12) -- locked
+  // to 600 after every write, same as ~/.ssh/config already gets, plus
+  // once at startup (Component.onCompleted below) to remediate a file
+  // that already existed with looser permissions from before this field
+  // was added. This is permission hardening, not encryption -- anything
+  // running as this user can still read the file.
+  Process {
+    id: bookmarksChmodProc
+    command: ["chmod", "600", root.bookmarksPath]
+  }
+
+  Timer {
+    id: bookmarksChmodTimer
+    interval: 200
+    repeat: false
+    onTriggered: bookmarksChmodProc.running = true
+  }
+
   Process {
     id: mkdirProc
-    command: ["mkdir", "-p", root.configDir]
+    command: ["mkdir", "-p", root.configDir, root.backupsDir]
     onExited: bookmarksFile.reload()
   }
 
@@ -139,8 +197,34 @@ Item {
     atomicWrites: true
     printErrors: false
     onFileChanged: reload()
-    onLoaded: if (root._acceptExternalSync) root._sshConfigText = text()
+    onLoaded: if (root._acceptExternalSync) { var t = text(); root._sshConfigText = t; root._syncBookmarkFieldsFromConfig(t) }
     onLoadFailed: if (root._acceptExternalSync) root._sshConfigText = ""
+  }
+
+  // Re-syncs a bookmark's OWN hostname/port/user from its real
+  // ~/.ssh/config block whenever that text changes externally (this
+  // function is only ever reached through the _acceptExternalSync gate
+  // above, or via _applyLoadedBookmarks' one-time catch-up call, so it can
+  // never race this plugin's own writes). Without this, hand-editing a
+  // bookmark's Port line updates the live PROBED display just fine
+  // (BarWidget resolves every alias fresh via `ssh -G` on every config
+  // change) but the bookmark's own JSON silently stayed stale forever --
+  // reopening Edit showed the old port, and Save would silently revert the
+  // hand-edit back to it. Deliberately does not touch `label`: a hand-
+  // renamed Host line is the existing, separately-handled "config entry
+  // missing" recovery path (the alias vanishes from ssh -G entirely), not
+  // this one.
+  function _syncBookmarkFieldsFromConfig(text) {
+    var changed = false
+    root.bookmarks = root.bookmarks.map(function(b) {
+      var found = SshConfigBlockWriter.findBlock(text, b.id)
+      if (!found) return b
+      var parsed = SshConfigBlockWriter.parseBlockFields(text.slice(found.beginIdx, found.endIdx))
+      if (parsed.hostname === b.hostname && parsed.port === b.port && parsed.user === b.user) return b
+      changed = true
+      return Object.assign({}, b, { hostname: parsed.hostname, port: parsed.port, user: parsed.user })
+    })
+    if (changed) root._scheduleSave()
   }
 
   Timer {
@@ -150,18 +234,84 @@ Item {
     onTriggered: root._acceptExternalSync = true
   }
 
+  // Backup-then-write is queued and strictly serialized (never "fire a
+  // backup Process, then immediately write") -- the backup's `cp` is async,
+  // so without a queue, two rapid writes could each back up already-stale
+  // content or interleave with each other. _sshConfigText itself still
+  // updates synchronously here (unchanged from before), preserving this
+  // file's existing guarantee that a second rapid call always sees the
+  // first's update already applied -- only the actual on-disk write+backup
+  // is deferred and ordered.
+  property var _pendingWrites: []
+  property bool _writeInFlight: false
+
   function _writeConfigText(newText) {
     root._sshConfigText = newText
     root._acceptExternalSync = false
-    sshConfigWriter.setText(newText)
-    chmodTimer.restart()
-    externalSyncGuardTimer.restart()
+    root._pendingWrites.push(newText)
+    root._processWriteQueue()
   }
+
+  function _processWriteQueue() {
+    if (root._writeInFlight || root._pendingWrites.length === 0) return
+    root._writeInFlight = true
+    rollingBackupProc.command = ["cp", "-p", root.sshConfigPath, root.backupsDir + "/config." + Date.now() + ".bak"]
+    rollingBackupProc.running = true
+  }
+
+  // Best-effort: exit code ignored (a brand-new install with no pre-
+  // existing ~/.ssh/config yet makes `cp` fail harmlessly, same as the
+  // one-time backupProc below already tolerates). The actual write, and
+  // the timers that gate reacting to it, only fire once this backup
+  // attempt has finished -- not at enqueue time -- so the 500ms external-
+  // sync suppression window starts when the write actually lands, not
+  // before.
+  Process {
+    id: rollingBackupProc
+    command: []
+    onExited: {
+      var newText = root._pendingWrites.shift()
+      sshConfigWriter.setText(newText)
+      chmodTimer.restart()
+      externalSyncGuardTimer.restart()
+      root._pruneBackups()
+      root._writeInFlight = false
+      root._processWriteQueue()
+    }
+  }
+
+  Process {
+    id: pruneListProc
+    command: []
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root._applyPrune(text) }
+  }
+
+  function _pruneBackups() {
+    pruneListProc.command = ["ls", "-1", root.backupsDir]
+    pruneListProc.running = true
+  }
+
+  function _applyPrune(raw) {
+    var names = String(raw || "").split("\n").filter(function(n) { return /^config\.\d+\.bak$/.test(n) })
+    // Numeric sort on the embedded ms-epoch timestamp, not lexical --
+    // fixed digit count for centuries so this is unambiguous either way,
+    // but explicit numeric comparison costs nothing and documents intent.
+    names.sort(function(a, b) { return Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]) })
+    if (names.length <= root._maxBackups) return
+    var toDelete = names.slice(0, names.length - root._maxBackups).map(function(n) { return root.backupsDir + "/" + n })
+    pruneRmProc.command = ["rm", "-f"].concat(toDelete)
+    pruneRmProc.running = true
+  }
+
+  Process { id: pruneRmProc; command: [] }
 
   // One-time safety backup, idempotent via `cp -n` (no-clobber -- copies
   // only if the destination doesn't already exist). Run once at startup
   // rather than per-write: every real write happens after the popup is
   // interactive, which is always after Component.onCompleted has run.
+  // Deliberately left untouched by the rolling backup above -- this
+  // remains the one snapshot of "before this plugin ever touched
+  // anything," never overwritten.
   Process {
     id: backupProc
     command: ["cp", "-n", "-p", root.sshConfigPath, root.sshConfigBackupPath]
@@ -184,6 +334,7 @@ Item {
   Component.onCompleted: {
     mkdirProc.running = true
     backupProc.running = true
+    bookmarksChmodProc.running = true
   }
 
   // ------------------------------------------------------------------ validation
@@ -222,6 +373,26 @@ Item {
       var portNum = Number(port)
       if (!isFinite(portNum) || portNum < 1 || portNum > 65535) return "Port must be between 1 and 65535."
     }
+    var rdpPort = fields ? fields.rdpPort : undefined
+    if (rdpPort !== undefined && rdpPort !== null && rdpPort !== "") {
+      var rdpPortNum = Number(rdpPort)
+      if (!isFinite(rdpPortNum) || rdpPortNum < 1 || rdpPortNum > 65535) return "RDP Port must be between 1 and 65535."
+    }
+    // No _userRe check here, deliberately -- see _fieldsToBookmark's own
+    // comment on why a real Windows account name (e.g. "Jordan Thomas")
+    // needs a looser rule than the SSH `user` field. Same basic hygiene as
+    // notes/group instead: no embedded newlines, length cap.
+    var rdpUser = String((fields && fields.rdpUser) || "").trim()
+    if (rdpUser && (root._noNewlineRe.test(rdpUser) || rdpUser.length > 200)) return "RDP User must be a single line, under 200 characters."
+    // No charset restriction beyond this (unlike user/rdpUser) -- these
+    // never get shell-interpreted (sshpass/xfreerdp3 are always invoked
+    // via a plain argv array, never a shell string, so there's no
+    // injection surface from special characters), only embedded newlines
+    // would actually break anything (single-line UI rendering).
+    var password = String((fields && fields.password) || "")
+    if (password && (root._noNewlineRe.test(password) || password.length > 200)) return "Password must be a single line, under 200 characters."
+    var rdpPassword = String((fields && fields.rdpPassword) || "")
+    if (rdpPassword && (root._noNewlineRe.test(rdpPassword) || rdpPassword.length > 200)) return "RDP Password must be a single line, under 200 characters."
     if (mac && !root._macRe.test(mac)) return "MAC address must look like aa:bb:cc:dd:ee:ff."
     if (group && (root._noNewlineRe.test(group) || group.length > 200)) return "Group must be a single line, under 200 characters."
     if (notes && (root._noNewlineRe.test(notes) || notes.length > 200)) return "Notes must be a single line, under 200 characters."
@@ -261,7 +432,18 @@ Item {
       mac: String(fields.mac || "").trim(),
       group: String(fields.group || "").trim(),
       notes: String(fields.notes || "").trim(),
-      icon: String(fields.icon || "").trim()
+      icon: String(fields.icon || "").trim(),
+      favorite: !!fields.favorite,
+      protocol: (fields.protocol === "rdp" || fields.protocol === "vnc") ? fields.protocol : "ssh",
+      rdpPort: String(fields.rdpPort || 3389),
+      // .trim() only -- deliberately NOT run through _userRe (see
+      // _normalizeBookmark's comment): a real Windows account name can
+      // contain a space ("Jordan Thomas"), which _userRe's SSH-username
+      // shape would reject.
+      rdpUser: String(fields.rdpUser || "").trim(),
+      // No .trim() -- see _normalizeBookmark's own comment.
+      password: String(fields.password || ""),
+      rdpPassword: String(fields.rdpPassword || "")
     }
   }
 
@@ -321,6 +503,19 @@ Item {
     root._writeBookmarkBlock(target)
     root._scheduleSave()
     return ""
+  }
+
+  // Favorite is JSON-only, like mac/group/notes/icon -- never written into
+  // ~/.ssh/config, so this deliberately doesn't touch _writeBookmarkBlock
+  // at all (unlike updateBookmark, which always re-renders the block).
+  function setFavorite(id, value) {
+    var found = false
+    root.bookmarks = root.bookmarks.map(function(b) {
+      if (b.id !== id) return b
+      found = true
+      return Object.assign({}, b, { favorite: !!value })
+    })
+    if (found) root._scheduleSave()
   }
 
   function deleteBookmark(id) {

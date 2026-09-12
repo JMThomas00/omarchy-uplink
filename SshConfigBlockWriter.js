@@ -45,6 +45,28 @@ function renderBlock(bookmark) {
   return lines.join("\n")
 }
 
+// Reverse of renderBlock: pulls hostname/port/user back out of a bookmark's
+// own rendered block text. Parsed permissively line-by-line (not by
+// assuming renderBlock's fixed line order) since a hand-edit could reorder
+// or re-case directives. Missing Port/User lines map back to renderBlock's
+// own omission defaults ("22"/"") -- the whole point of the caller using
+// this is "the external file's current state wins," so a directive the
+// user removed by hand should read back as absent, not as whatever was
+// last known.
+function parseBlockFields(blockText) {
+  var result = { hostname: "", port: "22", user: "" }
+  var lines = String(blockText || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var m = lines[i].match(/^\s*(HostName|Port|User)\s+(\S+)/i)
+    if (!m) continue
+    var key = m[1].toLowerCase()
+    if (key === "hostname") result.hostname = m[2]
+    else if (key === "port") result.port = m[2]
+    else if (key === "user") result.user = m[2]
+  }
+  return result
+}
+
 // Finds this id's begin/end marker positions in `text`. Returns
 // { beginIdx, endIdx } (endIdx is the index right after the end marker's
 // last character) if both markers are found in order, or null otherwise

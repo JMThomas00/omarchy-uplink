@@ -51,12 +51,14 @@ Column {
   property bool sawInclude: false
   property bool wakeonlanAvailable: true
   property bool fileManagerAvailable: true
+  property bool remoteDesktopAvailable: true
 
   signal connectRequested(string alias)
   signal wakeRequested(string mac)
   signal browseRequested(string uri)
+  signal remoteDesktopRequested(string protocol, string hostname, string port, string user, string password)
 
-  width: Style.space(460)
+  width: Style.space(510)
   spacing: Style.spacing.panelGap
 
   // "" = closed, "add" = new bookmark, "edit" = editing formEditingId
@@ -84,14 +86,19 @@ Column {
       hostname: bookmark.hostname,
       port: bookmark.port,
       user: bookmark.user,
-      status: "checking",
-      uptime: ""
+      status: "checking"
     }
     return Object.assign({}, base, {
       mac: bookmark.mac,
       group: bookmark.group,
       notes: bookmark.notes,
-      icon: bookmark.icon
+      icon: bookmark.icon,
+      favorite: bookmark.favorite,
+      protocol: bookmark.protocol,
+      rdpPort: bookmark.rdpPort,
+      rdpUser: bookmark.rdpUser,
+      password: bookmark.password,
+      rdpPassword: bookmark.rdpPassword
     })
   }
 
@@ -138,6 +145,75 @@ Column {
     root.configRenameTarget = ""
   }
 
+  // ------------------------------------------------------------- keyboard nav
+  //
+  // Selection is KEY-based, not index-based: the navigable rows span two
+  // structurally separate Repeaters (nested group/bookmark Repeaters below,
+  // then a separate configHosts Repeater further down), both plain-JS-array
+  // models with no stable per-item identity (see groupedBookmarks' own
+  // header comment -- any bookmark mutation rebuilds the array from
+  // scratch). Holding an index or an Item reference across a rebuild would
+  // silently point at the wrong row or a destroyed one; a string key
+  // survives because it's recomputed fresh from current data on every read.
+  // "" = nothing selected.
+  property string selectedRowKey: ""
+  property int _deleteKeySeq: 0
+
+  // Built from the exact same filtering the two Repeaters below actually
+  // render (groupedBookmarks + F1's per-group collapse state, then the
+  // configHosts filter + its own collapse state) -- can never drift from
+  // what's on screen since it isn't a separate parallel computation.
+  readonly property var flatRows: {
+    var rows = []
+    var groups = root.groupedBookmarks
+    for (var g = 0; g < groups.length; g++) {
+      var group = groups[g]
+      var collapsed = group.name !== "" && root.settingsStoreRef && root.settingsStoreRef.collapsedGroups.indexOf(group.name) !== -1
+      if (collapsed) continue
+      for (var i = 0; i < group.bookmarks.length; i++) {
+        rows.push({ key: "bm:" + group.bookmarks[i].id, alias: group.bookmarks[i].label })
+      }
+    }
+    var configCollapsed = root.settingsStoreRef && root.settingsStoreRef.collapsedConfigHosts
+    if (!configCollapsed) {
+      var configHosts = root.hosts.filter(function(h) { return h.source === "config" })
+      for (var c = 0; c < configHosts.length; c++) {
+        rows.push({ key: "cfg:" + configHosts[c].alias, alias: configHosts[c].alias })
+      }
+    }
+    return rows
+  }
+
+  function handleMove(dy) {
+    var rows = root.flatRows
+    if (rows.length === 0) return
+    var idx = -1
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].key === root.selectedRowKey) { idx = i; break }
+    }
+    if (idx === -1) {
+      root.selectedRowKey = dy > 0 ? rows[0].key : rows[rows.length - 1].key
+      return
+    }
+    var next = Math.max(0, Math.min(rows.length - 1, idx + dy))
+    root.selectedRowKey = rows[next].key
+  }
+
+  function handleActivate() {
+    var rows = root.flatRows
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].key === root.selectedRowKey) { root.connectRequested(rows[i].alias); return }
+    }
+  }
+
+  // Config-host delete keeps its own, more careful multiAlias-safe path
+  // (see the config Repeater's onDeleteRequested below) -- deliberately not
+  // reachable via keyboard, only bookmark rows are.
+  function handleDeleteKey() {
+    if (root.selectedRowKey.indexOf("bm:") !== 0) return
+    root._deleteKeySeq++
+  }
+
   readonly property var _editingBookmark: {
     if (root.formMode !== "edit") return null
     var matches = root.bookmarkStoreRef ? root.bookmarkStoreRef.bookmarks.filter(function(b) { return b.id === root.formEditingId }) : []
@@ -159,8 +235,15 @@ Column {
       if (!namedMap[b.group]) { namedMap[b.group] = []; namedOrder.push(b.group) }
       namedMap[b.group].push(b)
     }
+    // Favorites sort first WITHIN each group -- no separate section, no
+    // duplication. Array.prototype.sort has been spec-mandated stable
+    // since ES2019, so non-favorites keep their existing relative order
+    // rather than needing a manual stable-sort workaround.
+    var byFavorite = function(a, b) { return (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0) }
+    ungrouped.sort(byFavorite)
     var groups = [{ name: "", bookmarks: ungrouped }]
     for (var g = 0; g < namedOrder.length; g++) {
+      namedMap[namedOrder[g]].sort(byFavorite)
       groups.push({ name: namedOrder[g], bookmarks: namedMap[namedOrder[g]] })
     }
     return groups
@@ -233,16 +316,36 @@ Column {
         width: root.width
         spacing: Style.spacing.rowGap
 
+        // Ungrouped ("") is never collapsible -- it's the default landing
+        // spot for every new bookmark and has no name to show collapsed,
+        // matching the existing name === "" gating already used for
+        // "+Add"/"No bookmarks yet" on this same header.
+        readonly property bool isCollapsed: groupSection.modelData.name !== "" && root.settingsStoreRef && root.settingsStoreRef.collapsedGroups.indexOf(groupSection.modelData.name) !== -1
+
         Row {
           width: parent.width
           spacing: Style.spacing.controlGap
 
           Text {
-            text: (groupSection.modelData.name || "Bookmarks") + " (" + groupSection.modelData.bookmarks.length + ")"
+            text: (groupSection.modelData.name !== "" ? (groupSection.isCollapsed ? "▸ " : "▾ ") : "") + (groupSection.modelData.name || "Bookmarks") + " (" + groupSection.modelData.bookmarks.length + ")"
             color: Qt.darker(Color.foreground, 1.2)
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
             font.bold: true
+
+            MouseArea {
+              anchors.fill: parent
+              anchors.margins: -Style.space(4)
+              enabled: groupSection.modelData.name !== ""
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                var name = groupSection.modelData.name
+                var current = root.settingsStoreRef.collapsedGroups
+                var next = groupSection.isCollapsed ? current.filter(function(g) { return g !== name }) : current.concat([name])
+                root.settingsStoreRef.setCollapsedGroups(next)
+              }
+            }
           }
 
           Text {
@@ -273,7 +376,7 @@ Column {
         }
 
         Repeater {
-          model: groupSection.modelData.bookmarks
+          model: groupSection.isCollapsed ? [] : groupSection.modelData.bookmarks
 
           delegate: HostRow {
             required property var modelData
@@ -282,14 +385,24 @@ Column {
             compact: root.settingsStoreRef ? root.settingsStoreRef.compactRows : false
             wakeonlanAvailable: root.wakeonlanAvailable
             fileManagerAvailable: root.fileManagerAvailable
+            remoteDesktopAvailable: root.remoteDesktopAvailable
             bookmarkId: modelData.id
             host: root._displayHostForBookmark(modelData)
             dotColor: root.statusColorFor ? root.statusColorFor(host.status) : Color.muted
+            // Re-evaluated fresh from current data on every rebuild, not
+            // dependent on this delegate instance surviving between
+            // keypresses. deleteKeySeq is the same shared counter on every
+            // row -- see HostRow's own comment on why it isn't gated to 0
+            // when unselected.
+            selected: root.selectedRowKey === ("bm:" + modelData.id)
+            deleteKeySeq: root._deleteKeySeq
             onConnectRequested: function(alias) { root.connectRequested(alias) }
             onEditRequested: function(bookmarkId) { root.openEditForm(bookmarkId) }
             onDeleteRequested: function(bookmarkId) { if (root.bookmarkStoreRef) root.bookmarkStoreRef.deleteBookmark(bookmarkId) }
             onWakeRequested: function(mac) { root.wakeRequested(mac) }
             onBrowseRequested: function(uri) { root.browseRequested(uri) }
+            onFavoriteRequested: function(bookmarkId) { if (root.bookmarkStoreRef) root.bookmarkStoreRef.setFavorite(bookmarkId, !modelData.favorite) }
+            onRemoteDesktopRequested: function(protocol, hostname, port, user, password) { root.remoteDesktopRequested(protocol, hostname, port, user, password) }
           }
         }
       }
@@ -321,6 +434,12 @@ Column {
       initialGroup: root._editingBookmark ? root._editingBookmark.group : ""
       initialNotes: root._editingBookmark ? root._editingBookmark.notes : ""
       initialIcon: root._editingBookmark ? root._editingBookmark.icon : ""
+      initialFavorite: root._editingBookmark ? root._editingBookmark.favorite : false
+      initialProtocol: root._editingBookmark ? root._editingBookmark.protocol : "ssh"
+      initialRdpPort: root._editingBookmark ? root._editingBookmark.rdpPort : "3389"
+      initialRdpUser: root._editingBookmark ? root._editingBookmark.rdpUser : ""
+      initialPassword: root._editingBookmark ? root._editingBookmark.password : ""
+      initialRdpPassword: root._editingBookmark ? root._editingBookmark.rdpPassword : ""
       onSaved: root.closeForm()
       onCancelled: root.closeForm()
     }
@@ -329,21 +448,41 @@ Column {
   // --------------------------------------------------------- ~/.ssh/config
 
   Column {
+    id: configSection
     width: parent.width
     spacing: Style.spacing.rowGap
 
     readonly property var configHosts: root.hosts.filter(function(h) { return h.source === "config"; })
+    // Mirrors F1's per-group collapse (groupSection.isCollapsed above) but
+    // as a single bool in SettingsStore rather than a name in a list --
+    // there's only ever one config-hosts section, not one per group name.
+    readonly property bool isCollapsed: root.settingsStoreRef && root.settingsStoreRef.collapsedConfigHosts
 
-    Text {
-      text: "From ~/.ssh/config (" + parent.configHosts.length + ")"
-      color: Qt.darker(Color.foreground, 1.2)
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
-      font.bold: true
+    Row {
+      width: parent.width
+      spacing: Style.spacing.controlGap
+
+      Text {
+        text: (configSection.isCollapsed ? "▸ " : "▾ ") + "From ~/.ssh/config (" + configSection.configHosts.length + ")"
+        color: Qt.darker(Color.foreground, 1.2)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        font.bold: true
+
+        MouseArea {
+          anchors.fill: parent
+          anchors.margins: -Style.space(4)
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: {
+            if (root.settingsStoreRef) root.settingsStoreRef.setCollapsedConfigHosts(!configSection.isCollapsed)
+          }
+        }
+      }
     }
 
     Text {
-      visible: parent.configHosts.length === 0
+      visible: !configSection.isCollapsed && configSection.configHosts.length === 0
       width: parent.width
       text: "No hosts found in ~/.ssh/config"
       color: Qt.darker(Color.foreground, 1.4)
@@ -353,7 +492,7 @@ Column {
     }
 
     Repeater {
-      model: parent.configHosts
+      model: configSection.isCollapsed ? [] : configSection.configHosts
 
       delegate: HostRow {
         width: root.width
@@ -362,6 +501,7 @@ Column {
         fileManagerAvailable: root.fileManagerAvailable
         host: modelData
         dotColor: root.statusColorFor ? root.statusColorFor(modelData.status) : Color.muted
+        selected: root.selectedRowKey === ("cfg:" + modelData.alias)
         onConnectRequested: function(alias) { root.connectRequested(alias) }
         // Deliberately NOT the bookmark delegate's handlers (bookmarkId is
         // always "" here) -- rename opens the minimal alias-only form
@@ -384,7 +524,7 @@ Column {
     }
 
     Text {
-      visible: root.sawInclude
+      visible: !configSection.isCollapsed && root.sawInclude
       width: parent.width
       text: "Some hosts may be defined via Include and aren't shown — see README."
       color: Qt.darker(Color.foreground, 1.4)

@@ -18,6 +18,9 @@ Item {
   property int probeIntervalSec: root.defaultProbeIntervalSec
   property int popupProbeIntervalSec: root.defaultPopupProbeIntervalSec
   property bool compactRows: false
+  property var collapsedGroups: []
+  property bool collapsedConfigHosts: false
+  property bool notifyStatusChanges: false
 
   property bool loaded: false
 
@@ -45,10 +48,16 @@ Item {
       root.probeIntervalSec = root._clampInterval(doc.probeIntervalSec, root.defaultProbeIntervalSec)
       root.popupProbeIntervalSec = root._clampInterval(doc.popupProbeIntervalSec, root.defaultPopupProbeIntervalSec)
       root.compactRows = !!doc.compactRows
+      root.collapsedGroups = Array.isArray(doc.collapsedGroups) ? doc.collapsedGroups : []
+      root.collapsedConfigHosts = !!doc.collapsedConfigHosts
+      root.notifyStatusChanges = !!doc.notifyStatusChanges
     } catch (e) {
       root.probeIntervalSec = root.defaultProbeIntervalSec
       root.popupProbeIntervalSec = root.defaultPopupProbeIntervalSec
       root.compactRows = false
+      root.collapsedGroups = []
+      root.collapsedConfigHosts = false
+      root.notifyStatusChanges = false
     }
   }
 
@@ -59,7 +68,10 @@ Item {
     onTriggered: settingsFile.setText(JSON.stringify({
       probeIntervalSec: root.probeIntervalSec,
       popupProbeIntervalSec: root.popupProbeIntervalSec,
-      compactRows: root.compactRows
+      compactRows: root.compactRows,
+      collapsedGroups: root.collapsedGroups,
+      collapsedConfigHosts: root.collapsedConfigHosts,
+      notifyStatusChanges: root.notifyStatusChanges
     }))
   }
 
@@ -80,6 +92,21 @@ Item {
 
   function setCompactRows(value) {
     root.compactRows = !!value
+    root._scheduleSave()
+  }
+
+  function setCollapsedGroups(list) {
+    root.collapsedGroups = Array.isArray(list) ? list : []
+    root._scheduleSave()
+  }
+
+  function setCollapsedConfigHosts(value) {
+    root.collapsedConfigHosts = !!value
+    root._scheduleSave()
+  }
+
+  function setNotifyStatusChanges(value) {
+    root.notifyStatusChanges = !!value
     root._scheduleSave()
   }
 

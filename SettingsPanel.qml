@@ -83,6 +83,35 @@ Item {
       }
     }
 
+    Row {
+      spacing: Style.spacing.controlGap
+
+      Rectangle {
+        id: notifyCheckbox
+        width: Style.space(16)
+        height: Style.space(16)
+        radius: Style.space(3)
+        border.width: Style.normalBorderWidth
+        border.color: Style.normalBorderColor
+        color: (root.settingsStoreRef && root.settingsStoreRef.notifyStatusChanges) ? Color.accent : "transparent"
+        anchors.verticalCenter: parent.verticalCenter
+
+        MouseArea {
+          anchors.fill: parent
+          cursorShape: Qt.PointingHandCursor
+          onClicked: if (root.settingsStoreRef) root.settingsStoreRef.setNotifyStatusChanges(!root.settingsStoreRef.notifyStatusChanges)
+        }
+      }
+
+      Text {
+        text: "Notify on status change"
+        color: Color.foreground
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        anchors.verticalCenter: parent.verticalCenter
+      }
+    }
+
     Text {
       text: (root.exportImportOpen ? "▾" : "▸") + " Export/Import"
       color: root.exportImportOpen ? Color.accent : Qt.darker(Color.foreground, 1.3)

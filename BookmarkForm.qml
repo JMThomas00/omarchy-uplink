@@ -22,6 +22,12 @@ Item {
   property string initialGroup: ""
   property string initialNotes: ""
   property string initialIcon: ""
+  property bool initialFavorite: false
+  property string initialProtocol: "ssh"
+  property string initialRdpPort: "3389"
+  property string initialRdpUser: ""
+  property string initialPassword: ""
+  property string initialRdpPassword: ""
 
   signal saved()
   signal cancelled()
@@ -30,6 +36,10 @@ Item {
   implicitHeight: column.implicitHeight
 
   property bool advancedOpen: false
+  property bool favoriteValue: false
+  property string protocolValue: "ssh"
+  property bool passwordRevealed: false
+  property bool rdpPasswordRevealed: false
 
   function _submit() {
     var fields = {
@@ -40,7 +50,13 @@ Item {
       group: groupField.text,
       icon: iconField.text,
       mac: macField.text,
-      notes: notesField.text
+      notes: notesField.text,
+      favorite: root.favoriteValue,
+      protocol: root.protocolValue,
+      rdpPort: rdpPortField.value,
+      rdpUser: rdpUserField.text,
+      password: passwordField.text,
+      rdpPassword: rdpPasswordField.text
     }
     var error = root.editingId
       ? root.bookmarkStore.updateBookmark(root.editingId, fields)
@@ -88,6 +104,17 @@ Item {
     iconField.text = root.initialIcon
     macField.text = root.initialMac
     notesField.text = root.initialNotes
+    root.favoriteValue = root.initialFavorite
+    root.protocolValue = root.initialProtocol || "ssh"
+    rdpPortField.value = Number(root.initialRdpPort) || 3389
+    rdpUserField.text = root.initialRdpUser
+    passwordField.text = root.initialPassword
+    rdpPasswordField.text = root.initialRdpPassword
+    // Reset to hidden every time the form (re)opens -- a password left
+    // revealed from editing one bookmark shouldn't still show in plain
+    // text when switching straight to editing a different one.
+    root.passwordRevealed = false
+    root.rdpPasswordRevealed = false
     root.advancedOpen = root.initialMac !== "" || root.initialNotes !== ""
     root.errorText = ""
     labelField.forceActiveFocus()
@@ -105,6 +132,21 @@ Item {
       verticalPadding: Style.spacing.controlPaddingY
       onAccepted: root._submit()
       Keys.onEscapePressed: root.cancelled()
+    }
+
+    Text {
+      text: root.favoriteValue ? "★ Favorite" : "☆ Favorite"
+      color: root.favoriteValue ? Color.accent : Qt.darker(Color.foreground, 1.3)
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+
+      MouseArea {
+        anchors.fill: parent
+        anchors.margins: -Style.space(3)
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.favoriteValue = !root.favoriteValue
+      }
     }
 
     TextField {
@@ -137,6 +179,179 @@ Item {
         verticalPadding: Style.spacing.controlPaddingY
         onAccepted: root._submit()
         Keys.onEscapePressed: root.cancelled()
+      }
+    }
+
+    // Plaintext storage, by explicit user request -- see BookmarkStore's
+    // own comment on `password`. Fed to `ssh` via `sshpass` at connect
+    // time (BarWidget.connectToHost), never written into ~/.ssh/config.
+    Row {
+      spacing: Style.spacing.controlGap
+
+      TextField {
+        id: passwordField
+        width: Style.space(232)
+        password: !root.passwordRevealed
+        placeholderText: "Password (optional)"
+        verticalPadding: Style.spacing.controlPaddingY
+        onAccepted: root._submit()
+        Keys.onEscapePressed: root.cancelled()
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.passwordRevealed ? "🙈" : "👁"
+        color: Qt.darker(Color.foreground, 1.3)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.body
+
+        MouseArea {
+          anchors.fill: parent
+          anchors.margins: -Style.space(3)
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.passwordRevealed = !root.passwordRevealed
+        }
+      }
+    }
+
+    Column {
+      spacing: Style.spacing.md
+
+      Text {
+        text: "Connect via"
+        color: Qt.darker(Color.foreground, 1.4)
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      // No prior segmented-control precedent anywhere in this shell's
+      // first-party panels to reuse -- built from the same Rectangle+Text+
+      // MouseArea idiom already used for Save/Cancel below. The underlying
+      // ~/.ssh/config Host block is written unconditionally regardless of
+      // this choice (SFTP Browse and `ssh <label>` keep working either
+      // way) -- this only decides which button HostRow shows for one-click
+      // connect.
+      //
+      // "vnc" deliberately left out of this list (2026-09-12) -- RDP now
+      // launches via xfreerdp3 directly (see BarWidget.launchRemoteDesktop),
+      // dropping the Remmina dependency, but xfreerdp doesn't speak VNC and
+      // no replacement VNC client has been chosen yet. BookmarkStore's own
+      // schema/validation still accepts "vnc" as a stored value (untouched,
+      // so a bookmark saved before this change doesn't lose its setting) --
+      // this is purely hiding the option from the picker until there's
+      // somewhere for it to actually go.
+      Row {
+        spacing: Style.spacing.controlGap
+
+        Repeater {
+          model: ["ssh", "rdp"]
+
+          delegate: Rectangle {
+            required property string modelData
+            width: Style.space(50)
+            height: Style.space(24)
+            radius: Style.cornerRadius
+            color: root.protocolValue === modelData ? Color.accent : (protoArea.containsMouse ? Style.hoverFill : Style.normalFill)
+            border.width: Style.normalBorderWidth
+            border.color: Style.normalBorderColor
+
+            Text {
+              anchors.centerIn: parent
+              text: modelData.toUpperCase()
+              color: root.protocolValue === modelData ? Color.background : Color.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            MouseArea {
+              id: protoArea
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.protocolValue = modelData
+            }
+          }
+        }
+      }
+
+      // Separate from the SSH `Port` field above -- deliberately, not an
+      // oversight. Reported live: an existing bookmark's Port had been left
+      // at its SSH default (22, from before RDP was even an option on this
+      // bookmark), and launchRemoteDesktop was reusing that SAME field for
+      // the RDP connection, so it tried to speak RDP on port 22 -- nothing
+      // there, xfreerdp3 exited almost instantly, terminal opened and
+      // closed with it. A Windows host's SSH port (if it even runs one) and
+      // its RDP port are two independent services on two different ports by
+      // default (22 vs 3389); one shared field can't represent both. This
+      // field is JSON-only, like mac/group/notes/icon -- never written into
+      // ~/.ssh/config (that block's own Port line still comes from the SSH
+      // `Port` field above, unaffected).
+      Row {
+        visible: root.protocolValue === "rdp"
+        spacing: Style.spacing.controlGap
+
+        NumberField {
+          id: rdpPortField
+          label: "RDP Port"
+          value: 3389
+          from: 1
+          to: 65535
+          fieldWidth: Style.space(80)
+          field.Keys.onReturnPressed: root._submit()
+        }
+
+        // NOT the SSH `User` field above -- deliberately, not just for the
+        // port-style split. Reported live: a real Windows account name
+        // ("Jordan Thomas") has a space in it, which the SSH `user` field's
+        // own validation (POSIX-username-shaped, no spaces, since it's
+        // written into ~/.ssh/config) would reject outright. Also
+        // JSON-only, never touches ~/.ssh/config.
+        TextField {
+          id: rdpUserField
+          anchors.bottom: parent.bottom
+          width: Style.space(180)
+          placeholderText: "Windows username"
+          verticalPadding: Style.spacing.controlPaddingY
+          onAccepted: root._submit()
+          Keys.onEscapePressed: root.cancelled()
+        }
+      }
+
+      // Plaintext storage, by explicit user request -- see BookmarkStore's
+      // own comment on `rdpPassword`. When set, launchRemoteDesktop skips
+      // the interactive terminal prompt entirely and authenticates
+      // non-interactively -- see its own comment for why that also means
+      // no terminal window at all for RDP anymore.
+      Row {
+        visible: root.protocolValue === "rdp"
+        spacing: Style.spacing.controlGap
+
+        TextField {
+          id: rdpPasswordField
+          width: Style.space(232)
+          password: !root.rdpPasswordRevealed
+          placeholderText: "Password (optional)"
+          verticalPadding: Style.spacing.controlPaddingY
+          onAccepted: root._submit()
+          Keys.onEscapePressed: root.cancelled()
+        }
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.rdpPasswordRevealed ? "🙈" : "👁"
+          color: Qt.darker(Color.foreground, 1.3)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+
+          MouseArea {
+            anchors.fill: parent
+            anchors.margins: -Style.space(3)
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.rdpPasswordRevealed = !root.rdpPasswordRevealed
+          }
+        }
       }
     }
 
@@ -176,7 +391,15 @@ Item {
 
     Flow {
       width: parent.width
-      spacing: Style.spacing.xxs
+      // controlGap, not xxs -- xxs renders at effectively zero width on at
+      // least one real theme (confirmed live: adjacent chip labels like
+      // "Raspberry Pi" and "T-Share Lab" ran together with no visible gap
+      // at all, reading as one garbled word). These are plain Text
+      // delegates with no padding of their own, so legibility here depends
+      // entirely on Flow's own inter-item spacing -- controlGap is the
+      // same token already used for the Port/User and Icon/Group rows
+      // above, comfortably non-zero regardless of theme.
+      spacing: Style.spacing.controlGap
       visible: root.groupSuggestions.length > 0
 
       Repeater {

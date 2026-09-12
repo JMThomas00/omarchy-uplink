@@ -14,38 +14,33 @@ import "ThemeStatusColors.js" as ThemeStatusColors
 // block was hand-deleted out from under the plugin, a synthesized row (see
 // _onSshConfigChanged) since a vanished alias never reaches ssh -G at all.
 
-// Uplink -- live reachability, uptime, and one-click terminal launch for
-// every host in ~/.ssh/config.
+// Uplink -- live reachability and one-click terminal launch for every host
+// in ~/.ssh/config.
 //
-// Two-stage probe per host, mirroring Linecast's "one-shot Process on a
-// Timer" shape rather than Waveform's reactive-service pattern (there is no
-// PipeWire-style live service here to bind to):
-//   Stage A -- an SSH banner grab (`timeout N bash -c 'exec 3<>/dev/tcp/H/P
-//     && dd bs=64 count=1 <&3'`), checking the response starts with "SSH-".
-//     This alone drives the status dot's up/down axis. No auth attempted,
-//     so it works identically regardless of the host's auth method --
-//     confirmed live: a plain TCP connect (the original v1 design) can't
-//     tell a real sshd apart from anything else listening on that port,
-//     but more importantly, gating "up" on the uptime probe below (Stage B)
-//     meant any host using password auth -- no passwordless key from this
-//     machine -- showed amber forever, even though the user could connect
-//     to it fine interactively via Connect. The banner is what an SSH
-//     client itself relies on (RFC 4253: the server sends its
-//     identification string immediately on connect, before any auth
-//     happens), so checking for it is the accurate, auth-independent
-//     signal for "yes, a real SSH server is answering here." `dd`, not
-//     `head -c N`, is what actually reads it correctly -- see _runTcpProbe
-//     for why (a server with a short banner that then waits for the
-//     client's own, e.g. Forgejo's embedded Go SSH server, made `head -c
-//     64` hang for the full probe timeout with zero output every time,
-//     misreporting a live host as down).
-//   Stage B -- a non-interactive `ssh -o BatchMode=yes ... uptime`, only
-//     attempted once Stage A confirms a real SSH server and only while the
-//     popup is open. Purely a bonus now -- its result populates the uptime
-//     text when this machine has passwordless key access, but no longer
-//     gates the status color; BatchMode=yes still keeps it from ever
-//     hanging on a password prompt, it just fails fast and quietly instead
-//     of dragging the whole host down to a permanent "can't confirm" state.
+// One-shot Process on a Timer per host, mirroring Linecast's own shape
+// rather than Waveform's reactive-service pattern (there is no
+// PipeWire-style live service here to bind to): an SSH banner grab
+// (`timeout N bash -c 'exec 3<>/dev/tcp/H/P && dd bs=64 count=1 <&3'`),
+// checking the response starts with "SSH-". No auth attempted, so it works
+// identically regardless of the host's auth method -- confirmed live: a
+// plain TCP connect (the original v1 design) can't tell a real sshd apart
+// from anything else listening on that port. The banner is what an SSH
+// client itself relies on (RFC 4253: the server sends its identification
+// string immediately on connect, before any auth happens), so checking for
+// it is the accurate, auth-independent signal for "yes, a real SSH server
+// is answering here." `dd`, not `head -c N`, is what actually reads it
+// correctly -- see _runTcpProbe for why (a server with a short banner that
+// then waits for the client's own, e.g. Forgejo's embedded Go SSH server,
+// made `head -c 64` hang for the full probe timeout with zero output every
+// time, misreporting a live host as down).
+//
+// A second stage (a non-interactive `ssh -o BatchMode=yes ... uptime`, a
+// purely cosmetic uptime bonus for hosts with passwordless key access)
+// existed here through v2.4.x -- removed once the uptime display itself
+// was removed from HostRow.qml, since a background probe running purely
+// to compute a value nothing shows anymore was pure waste (one extra `ssh`
+// process spawned per host, every popup-open probe tick, for zero
+// observable benefit).
 // `ssh` and `bash`/`timeout` are trusted system binaries invoked directly
 // via Process, exactly like Waveform calls `pw-cli` directly -- unlike
 // Linecast's ptyrun.py, no verification wrapper is needed here.
@@ -57,15 +52,12 @@ BarWidget {
 
   // ------------------------------------------------------------------ hosts
   //
-  // { alias, hostname, port, user, status, uptime, lastCheckedAt }
+  // { alias, hostname, port, user, status, lastCheckedAt }
   // status: "checking" | "up" | "down"
   //   checking -- not yet probed this session / probe in flight
-  //   up       -- Stage A confirmed a real SSH banner -- independent of
-  //               auth method, so this is accurate for both key- and
-  //               password-auth hosts. `uptime` is a separate bonus field
-  //               (Stage B, popup-open only) that's populated when this
-  //               machine has passwordless key access and left at "--"
-  //               otherwise -- it no longer affects status/color.
+  //   up       -- the banner probe confirmed a real SSH server -- independent
+  //               of auth method, so this is accurate for both key- and
+  //               password-auth hosts.
   //   down     -- Stage A failed (timeout, refused, or something answered
   //               that wasn't a real SSH server)
   property var hosts: []
@@ -177,7 +169,6 @@ BarWidget {
         port: cached ? cached.port : "22",
         user: cached ? cached.user : "",
         status: cached ? cached.status : "checking",
-        uptime: cached ? cached.uptime : "",
         lastCheckedAt: cached ? cached.lastCheckedAt : 0,
         source: source
       }
@@ -189,7 +180,7 @@ BarWidget {
     // rather than resolve with an empty hostname. Detected here via a
     // direct diff against bookmarkStore's own list instead. `configMissing`
     // marks the row so the periodic probe loops (which would otherwise
-    // happily TCP/uptime-probe the bookmark's raw fields and silently
+    // happily TCP-probe the bookmark's raw fields and silently
     // overwrite this status) skip it until the block is restored.
     var presentAliases = {}
     for (var k = 0; k < parsed.aliases.length; k++) presentAliases[parsed.aliases[k]] = true
@@ -203,7 +194,6 @@ BarWidget {
         port: bm.port,
         user: bm.user,
         status: "down",
-        uptime: "config entry missing — edit to restore",
         lastCheckedAt: Date.now(),
         source: "bookmark",
         configMissing: true
@@ -242,10 +232,9 @@ BarWidget {
     var resolved = SshConfigParser.parseResolvedConfig(raw)
     if (!resolved.hostname) return
     root._patchHost(alias, { hostname: resolved.hostname, port: resolved.port, user: resolved.user })
-    // Kick an immediate first check as soon as a host resolves, rather than
-    // waiting for the next timer tick -- also picks up Stage B right away
-    // if the popup happens to already be open.
-    root._runTcpProbe(alias, root.opened)
+    // Kick an immediate first check as soon as a host resolves, rather
+    // than waiting for the next timer tick.
+    root._runTcpProbe(alias)
   }
 
   // ------------------------------------------------------------------ probing
@@ -258,26 +247,25 @@ BarWidget {
     Process {
       id: proc
       property string hostAlias: ""
-      property bool alsoUptime: false
       property string capturedText: ""
       // Set at createObject() time (see _runTcpProbe) -- onExited is baked
       // into this Component template itself, so it can't close over a
       // local variable from the calling function the way a fresh closure
       // could; it can only read properties living on the proc instance,
-      // exactly like hostAlias/capturedText/alsoUptime already do.
+      // exactly like hostAlias/capturedText already do.
       property double startedAtMs: 0
       stdout: StdioCollector {
         waitForEnd: true
         onStreamFinished: proc.capturedText = text
       }
       onExited: function(exitCode, exitStatus) {
-        root._applyBannerResult(proc.hostAlias, exitCode, proc.capturedText, proc.alsoUptime, Date.now() - proc.startedAtMs)
+        root._applyBannerResult(proc.hostAlias, exitCode, proc.capturedText, Date.now() - proc.startedAtMs)
         proc.destroy()
       }
     }
   }
 
-  function _runTcpProbe(alias, alsoUptime) {
+  function _runTcpProbe(alias) {
     var host = root._hostByAlias(alias)
     if (!host || !host.hostname) return
     // `&&` means dd only ever runs once the TCP connect itself succeeds --
@@ -301,124 +289,85 @@ BarWidget {
     // the whole thing generously for a slow LAN hop.
     var cmd = ["timeout", "3", "bash", "-c",
       "exec 3<>/dev/tcp/" + host.hostname + "/" + host.port + " && dd bs=64 count=1 <&3 2>/dev/null"]
-    var proc = bannerProbeComponent.createObject(root, { command: cmd, hostAlias: alias, alsoUptime: alsoUptime, startedAtMs: Date.now() })
+    var proc = bannerProbeComponent.createObject(root, { command: cmd, hostAlias: alias, startedAtMs: Date.now() })
     proc.running = true
   }
 
-  function _applyBannerResult(alias, exitCode, raw, alsoUptime, elapsedMs) {
+  function _applyBannerResult(alias, exitCode, raw, elapsedMs) {
     var now = Date.now()
     var confirmed = exitCode === 0 && String(raw || "").indexOf("SSH-") === 0
+    // Captured BEFORE _patchHost mutates root.hosts below -- _hostByAlias
+    // reads root.hosts, so this MUST run first or it'd see the just-applied
+    // new status instead of the real previous one.
+    var prevHost = root._hostByAlias(alias)
+    var prevStatus = prevHost ? prevHost.status : "checking"
+    var newStatus = confirmed ? "up" : "down"
     if (!confirmed) {
       // latencyMs explicitly cleared here (not left as-is) so a stale
       // last-known value can't linger and be read by anything that
       // doesn't also gate on status === "up".
       root._patchHost(alias, { status: "down", lastCheckedAt: now, latencyMs: null })
-      return
+    } else {
+      root._patchHost(alias, { status: "up", lastCheckedAt: now, latencyMs: elapsedMs })
     }
-    root._patchHost(alias, { status: "up", lastCheckedAt: now, latencyMs: elapsedMs })
-    if (alsoUptime) root._probeUptime(alias)
+    root._maybeNotifyStatusChange(alias, prevStatus, newStatus)
   }
 
-  Component {
-    id: uptimeProcComponent
-    Process {
-      id: proc
-      property string hostAlias: ""
-      property string capturedText: ""
-      stdout: StdioCollector {
-        waitForEnd: true
-        onStreamFinished: proc.capturedText = text
-      }
-      onExited: function(exitCode, exitStatus) {
-        root._applyUptimeResult(proc.hostAlias, exitCode, proc.capturedText)
-        proc.destroy()
-      }
-    }
-  }
-
-  function _probeUptime(alias) {
-    var host = root._hostByAlias(alias)
-    if (!host) return
-    // Connects via the ssh CONFIG ALIAS, not a reconstructed user@hostname
-    // -p port -- deliberately, and not just for tidiness. A reconstructed
-    // target bypasses `~/.ssh/config`'s per-Host directives entirely,
-    // `IdentityFile` above all: confirmed live against a real host using a
-    // dedicated (non-default-named) key that the alias resolves correctly
-    // but a raw `user@ip -p port` connection doesn't, so this probe was
-    // silently failing to authenticate for any host set up with its own
-    // key file -- exactly the standard setup for a git-mirror-style host
-    // (see the vault's own onboarding playbook), not an edge case. Using
-    // the alias here matches connectToHost's own `ssh <alias>` exactly, so
-    // "can this probe authenticate" and "can Connect authenticate" are now
-    // answering the literal same question instead of two different ones.
-    var cmd = [
-      "timeout", "6", "ssh",
-      "-o", "BatchMode=yes",
-      "-o", "ConnectTimeout=4",
-      "-o", "StrictHostKeyChecking=accept-new",
-      alias, "uptime"
-    ]
-    var proc = uptimeProcComponent.createObject(root, { command: cmd, hostAlias: alias })
-    proc.running = true
-  }
-
-  function _applyUptimeResult(alias, exitCode, raw) {
-    // Purely a bonus at this point -- status is already "up" from the
-    // banner check by the time this runs (Stage B is only ever kicked off
-    // from _applyBannerResult after `confirmed` is true), so a failure here
-    // (most commonly: this machine has no passwordless key for the host,
-    // confirmed live against a password-auth-only Raspberry Pi -- exit 255,
-    // "Permission denied (publickey,password)") just means no uptime text,
-    // never a status change. Leaves any previously-obtained uptime text
-    // alone on failure rather than clearing it back to "--", so a transient
-    // hiccup doesn't regress a value that was already showing correctly.
-    if (exitCode === 0) {
-      root._patchHost(alias, { uptime: String(raw || "").trim(), lastCheckedAt: Date.now() })
+  // No early return above (unlike the original shape this replaced) --
+  // deliberately restructured so this always runs regardless of which
+  // branch fired; the earlier version's `if (!confirmed) { ...; return }`
+  // would have made a down-transition notification unreachable dead code
+  // if appended naively after it.
+  function _maybeNotifyStatusChange(alias, prevStatus, newStatus) {
+    if (!settingsStore.notifyStatusChanges) return
+    // Suppresses a notification burst when every host does its first-ever
+    // classification (shell/plugin startup) -- only a REAL transition
+    // between two already-known states counts.
+    if (prevStatus !== "up" && prevStatus !== "down") return
+    if (prevStatus === newStatus) return
+    var omarchyPath = Quickshell.env("OMARCHY_PATH")
+    if (newStatus === "down") {
+      Quickshell.execDetached([omarchyPath + "/bin/omarchy-notification-send", "-u", "critical", "--app-name", "Uplink", alias + " is down", "SSH host became unreachable"])
+    } else {
+      Quickshell.execDetached([omarchyPath + "/bin/omarchy-notification-send", "-u", "normal", "--app-name", "Uplink", alias + " is back up", "SSH host is reachable again"])
     }
   }
 
-  function _probeAllStageA() {
+  function _probeAll() {
     for (var i = 0; i < root.hosts.length; i++) {
       var h = root.hosts[i]
-      if (h.hostname && !h.configMissing) root._runTcpProbe(h.alias, false)
+      if (h.hostname && !h.configMissing) root._runTcpProbe(h.alias)
     }
   }
 
-  function _probeAllFull() {
-    for (var i = 0; i < root.hosts.length; i++) {
-      var h = root.hosts[i]
-      if (h.hostname && !h.configMissing) root._runTcpProbe(h.alias, true)
-    }
-  }
-
-  // Background: cheap Stage-A-only sweep, always running -- drives
-  // anyHostDown/the bar icon even while the popup has never been opened.
-  // Interval is settings-driven; don't rely on the reactive `interval:`
-  // binding alone to apply a change mid-countdown deterministically (Qt's
-  // own Timer semantics for that case aren't established anywhere in this
-  // codebase) -- the explicit `Connections` block below restarts both
-  // timers immediately whenever the setting actually changes.
+  // Background: cheap sweep, always running -- drives anyHostDown/the bar
+  // icon even while the popup has never been opened. Interval is
+  // settings-driven; don't rely on the reactive `interval:` binding alone to
+  // apply a change mid-countdown deterministically (Qt's own Timer semantics
+  // for that case aren't established anywhere in this codebase) -- the
+  // explicit `Connections` block below restarts both timers immediately
+  // whenever the setting actually changes.
   Timer {
-    id: stageATimer
+    id: backgroundProbeTimer
     interval: settingsStore.probeIntervalSec * 1000
     running: true
     repeat: true
-    onTriggered: root._probeAllStageA()
+    onTriggered: root._probeAll()
   }
 
-  // Popup-open: full Stage A + Stage B sweep -- mirrors Waveform's
+  // Popup-open: same sweep, just on a tighter cadence -- mirrors Waveform's
   // `running: root.opened` split for its own more expensive theme poll.
   Timer {
     id: fullSweepTimer
     interval: settingsStore.popupProbeIntervalSec * 1000
     running: root.opened
     repeat: true
-    onTriggered: root._probeAllFull()
+    onTriggered: root._probeAll()
   }
 
   Connections {
     target: settingsStore
-    function onProbeIntervalSecChanged() { stageATimer.restart() }
+    function onProbeIntervalSecChanged() { backgroundProbeTimer.restart() }
     function onPopupProbeIntervalSecChanged() { fullSweepTimer.restart() }
   }
 
@@ -438,8 +387,8 @@ BarWidget {
   // built from user input at all, and "db" can never match inside
   // "db-replica" since token equality isn't substring containment. This
   // also keeps the popup-open tick's process-spawn cost flat (1 process)
-  // regardless of host count, instead of stacking a 4th per-host probe on
-  // top of the existing banner+uptime ones already running on this cadence.
+  // regardless of host count, instead of stacking a 3rd per-host probe on
+  // top of the existing banner one already running on this cadence.
   Component {
     id: connectedPollProcComponent
     Process {
@@ -475,6 +424,17 @@ BarWidget {
       var spaceIdx = line.indexOf(" ")
       if (spaceIdx === -1) continue
       var tokens = line.slice(spaceIdx + 1).split(/\s+/)
+      // This plugin's OWN _resolveAlias also spawns something starting with
+      // "ssh ": `ssh -G <alias>`. That would otherwise false-positive this
+      // host as "connected" whenever a pgrep snapshot lands mid-probe --
+      // confirmed this is the actual root cause of the previously-unresolved
+      // "wrong host shows connected" artifact, not a rendering fluke. `-G`
+      // is unique to that call; connectToHost's own `omarchy-launch-terminal
+      // ssh <alias>` has neither, so a real interactive session is
+      // unaffected. Accepted limitation: a bookmark literally labeled "-G"
+      // would be wrongly excluded here too -- pathological, not worth
+      // defending against.
+      if (tokens.indexOf("-G") !== -1) continue
       for (var t = 0; t < tokens.length; t++) {
         if (connectedAliases.indexOf(tokens[t]) === -1) connectedAliases.push(tokens[t])
       }
@@ -561,6 +521,124 @@ BarWidget {
     proc.running = true
   }
 
+  // --------------------------------------------------------------- sshpass
+  //
+  // Same optional-dependency shape as Wake-on-LAN/Browse. A stored SSH
+  // password (2026-09-12) is fed to `ssh` non-interactively via `sshpass`
+  // -- plain `ssh` has no CLI flag for a password at all (deliberately, by
+  // design). Without sshpass installed, connectToHost falls back to
+  // plain `ssh <alias>` even when a password is stored, same as it always
+  // has -- the terminal just prompts interactively like before.
+  property bool sshpassAvailable: true
+
+  Process {
+    id: sshpassCheckProc
+    command: []
+    onExited: function(exitCode) { root.sshpassAvailable = exitCode === 0 }
+  }
+
+  function _checkSshpass() {
+    if (sshpassCheckProc.running) return
+    sshpassCheckProc.command = ["which", "sshpass"]
+    sshpassCheckProc.running = true
+  }
+
+  // ------------------------------------------------------------------ RDP
+  //
+  // Same optional-dependency shape as Wake-on-LAN/Browse above. Switched
+  // from Remmina to xfreerdp3 directly (2026-09-12) -- Remmina's own
+  // connection-window embedding needs GtkSocket/XEmbed (X11-only, doesn't
+  // exist under Wayland; workaround was GDK_BACKEND=x11) and its RDP/VNC
+  // plugins are separate optional systemdeps (`freerdp`/`gtk-vnc`) on top
+  // of the `remmina` package itself -- xfreerdp3 (part of `freerdp`,
+  // already required either way) sidesteps all of that: it's not a GTK
+  // app, opens its own plain window, no embedding involved. `xfreerdp3` is
+  // this system's actual binary name (FreeRDP 3.x's own convention, not
+  // `xfreerdp`) -- confirmed via `pacman -Ql freerdp`. VNC has no
+  // equivalent here (xfreerdp doesn't speak VNC) and is deliberately
+  // hidden from BookmarkForm's protocol selector until a dedicated VNC
+  // client is chosen -- see that file's own comment.
+  property bool remoteDesktopAvailable: true
+
+  Process {
+    id: remoteDesktopCheckProc
+    command: []
+    onExited: function(exitCode) { root.remoteDesktopAvailable = exitCode === 0 }
+  }
+
+  function _checkRemoteDesktop() {
+    if (remoteDesktopCheckProc.running) return
+    remoteDesktopCheckProc.command = ["which", "xfreerdp3"]
+    remoteDesktopCheckProc.running = true
+  }
+
+  Component { id: remoteDesktopProcComponent; Process {} }
+
+  // Only "rdp" is wired up; "vnc" can't reach here while it's hidden from
+  // the protocol selector, but this no-ops rather than misbehaving if a
+  // pre-existing bookmark somehow still carries protocol: "vnc".
+  //
+  // Routed through omarchy-launch-terminal, same as connectToHost's own
+  // ssh launch -- NOT a bare detached Process. Confirmed live this is
+  // required, not just tidy: unlike Remmina's GTK plugin (its own proper
+  // login form), the standalone xfreerdp3 CLI client has no graphical
+  // credential prompt at all -- Domain/Username/Password entry for NLA
+  // authentication is read from the controlling terminal
+  // (client_cli_read_string), and a detached launch with no TTY fails
+  // immediately ("tcgetattr() failed with Inappropriate ioctl for device",
+  // "NLA begin failed") rather than opening anything. A real terminal
+  // fixes this the same way it already does for SSH: briefly shows the
+  // Domain/Username/Password prompt, then xfreerdp3 opens its own separate
+  // window for the actual remote desktop session once authenticated.
+  function launchRemoteDesktop(protocol, hostname, rdpPort, rdpUser, rdpPassword) {
+    if (!hostname || protocol !== "rdp") return
+    var vArg = "/v:" + hostname + (rdpPort && rdpPort !== "3389" ? ":" + rdpPort : "")
+    var args = ["xfreerdp3", vArg,
+      // tofu (trust-on-first-use): accepts the cert on first connect,
+      // denies on a later mismatch -- not /cert:ignore. Confirmed live
+      // this alone is silently handled with no interactive prompt either
+      // way, so it doesn't need the terminal the credential prompt does.
+      "/cert:tofu",
+      // Without these, xfreerdp3 defaults to a small fixed-size window
+      // (reported live: the actual remote desktop rendered tiny in a
+      // corner of the screen). +f is real fullscreen, with its own
+      // documented toggle (Ctrl+Alt+Enter) rather than trapping the user
+      // in it; /dynamic-resolution means toggling out to a resizable
+      // window and resizing it live-resizes the remote session too,
+      // instead of just scaling/black-bars.
+      "+f", "/dynamic-resolution"]
+    // Without /u:, xfreerdp3 silently defaults to the LOCAL LINUX
+    // username (logged as "No user name set. - Using login name: <linux
+    // user>") and only prompts for Domain/Password -- never for username,
+    // so there's no way to correct it interactively. Confirmed live this
+    // is exactly what broke a real connection attempt: every login
+    // silently failed until rdpUser was actually set on the bookmark.
+    if (rdpUser) args.push("/u:" + rdpUser)
+    var command
+    if (rdpPassword) {
+      // A stored password means xfreerdp3 can authenticate fully non-
+      // interactively -- no terminal needed at all anymore, so this skips
+      // omarchy-launch-terminal entirely and the RDP session window IS
+      // the xfreerdp3 process (not wrapped in anything else). That's also
+      // what makes "closed when the session ends" just fall out for free:
+      // closing that window (Super+W or any other way), the remote
+      // machine shutting down, or the connection dropping all directly
+      // end this one process -- there's no separate terminal left
+      // lingering to clean up.
+      args.push("/p:" + rdpPassword)
+      command = args
+    } else {
+      // No stored password -- still needs the terminal for the
+      // interactive Domain/Password prompt (xfreerdp3's CLI client has no
+      // graphical credential prompt at all; see the DEV_TESTING.md entry
+      // on this).
+      command = ["/usr/share/omarchy/bin/omarchy-launch-terminal"].concat(args)
+    }
+    var proc = remoteDesktopProcComponent.createObject(root, { command: command })
+    proc.exited.connect(function() { proc.destroy() })
+    proc.running = true
+  }
+
   // ------------------------------------------------------- state/cache
   //
   // Deliberately outside ~/.config/omarchy/plugins/uplink/ (this
@@ -621,7 +699,7 @@ BarWidget {
     var doc = { hosts: {} }
     for (var i = 0; i < root.hosts.length; i++) {
       var h = root.hosts[i]
-      doc.hosts[h.alias] = { hostname: h.hostname, port: h.port, user: h.user, status: h.status, uptime: h.uptime, lastCheckedAt: h.lastCheckedAt }
+      doc.hosts[h.alias] = { hostname: h.hostname, port: h.port, user: h.user, status: h.status, lastCheckedAt: h.lastCheckedAt }
     }
     stateFile.setText(JSON.stringify(doc))
   }
@@ -632,7 +710,7 @@ BarWidget {
     onExited: stateFile.reload()
   }
 
-  Component.onCompleted: { mkdirProc.running = true; root._checkWakeonlan(); root._checkFileManager() }
+  Component.onCompleted: { mkdirProc.running = true; root._checkWakeonlan(); root._checkFileManager(); root._checkRemoteDesktop(); root._checkSshpass() }
 
   // --------------------------------------------------------------- theming
   //
@@ -663,7 +741,10 @@ BarWidget {
     return Color.muted
   }
 
-  onOpenedChanged: if (root.opened) { themeColorsFile.reload(); root._probeAllFull(); root._pollConnected(); root._checkWakeonlan(); root._checkFileManager() }
+  onOpenedChanged: {
+    if (root.opened) { themeColorsFile.reload(); root._probeAll(); root._pollConnected(); root._checkWakeonlan(); root._checkFileManager(); root._checkRemoteDesktop(); root._checkSshpass() }
+    else if (contentLoader.item) contentLoader.item.selectedRowKey = ""
+  }
 
   // ---------------------------------------------------------- terminal launch
   //
@@ -677,8 +758,20 @@ BarWidget {
   Component { id: launchProcComponent; Process {} }
 
   function connectToHost(alias) {
+    // Looked up by alias, not threaded through connectRequested's own
+    // signal chain -- connectRequested is shared by BOTH bookmark and
+    // plain ~/.ssh/config rows (which never have a stored password at
+    // all), so finding the bookmark here (if any) keeps that signal's
+    // signature untouched. Still always launches IN a terminal, unlike
+    // RDP -- unlike a GUI remote-desktop session, an SSH shell session
+    // visibly living in a terminal is the whole point, stored password or
+    // not.
+    var bookmark = bookmarkStore.bookmarks.filter(function(b) { return b.label === alias })[0]
+    var sshCommand = (bookmark && bookmark.password && root.sshpassAvailable)
+      ? ["sshpass", "-p", bookmark.password, "ssh", alias]
+      : ["ssh", alias]
     var proc = launchProcComponent.createObject(root, {
-      command: ["/usr/share/omarchy/bin/omarchy-launch-terminal", "ssh", alias]
+      command: ["/usr/share/omarchy/bin/omarchy-launch-terminal"].concat(sshCommand)
     })
     proc.exited.connect(function() { proc.destroy() })
     proc.running = true
@@ -782,7 +875,7 @@ BarWidget {
     bar: root.bar
     centerOnBar: root.barSection === "center"
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(460))
+    contentWidth: panel.fittedContentWidth(Style.space(510))
     contentHeight: panel.fittedContentHeight(
       contentLoader.item ? contentLoader.item.implicitHeight : Style.space(120),
       Style.space(560))
@@ -800,6 +893,13 @@ BarWidget {
       blocked: contentLoader.item ? contentLoader.item.formOpen : false
       onCloseRequested: root.closePanel()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onMoveRequested: function(dx, dy) { if (contentLoader.item) contentLoader.item.handleMove(dy) }
+      // Deliberately only activateRequested, not also returnRequested --
+      // PanelKeyCatcher's own Keys.onPressed fires BOTH signals for Enter
+      // (Space fires only activateRequested), so wiring both here would
+      // launch two terminals per Enter press.
+      onActivateRequested: function() { if (contentLoader.item) contentLoader.item.handleActivate() }
+      onDeleteRequested: function() { if (contentLoader.item) contentLoader.item.handleDeleteKey() }
 
       // The popup's own height caps at Style.space(560) (see contentHeight
       // above) or the screen's available space, whichever is smaller --
@@ -843,9 +943,11 @@ BarWidget {
           statusColorFor: root.colorForStatus
           wakeonlanAvailable: root.wakeonlanAvailable
           fileManagerAvailable: root.fileManagerAvailable
+          remoteDesktopAvailable: root.remoteDesktopAvailable
           onConnectRequested: function(alias) { root.connectToHost(alias) }
           onWakeRequested: function(mac) { root.wakeHost(mac) }
           onBrowseRequested: function(uri) { root.openFileManager(uri) }
+          onRemoteDesktopRequested: function(protocol, hostname, port, user, password) { root.launchRemoteDesktop(protocol, hostname, port, user, password) }
         }
       }
     }
