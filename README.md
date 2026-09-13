@@ -4,6 +4,8 @@ Live reachability and one-click SSH/RDP launch for every host in your
 `~/.ssh/config` -- right from the bar. Save your own bookmarked
 connections too, right alongside them.
 
+![Uplink popup showing grouped bookmarks and ~/.ssh/config hosts, each with a live status dot, favorite/edit/delete/browse controls, and Ping/SSH/RDP buttons](preview.png)
+
 ## Features
 
 - **Reads your real `~/.ssh/config`.** No separate host list to maintain --
@@ -125,14 +127,16 @@ rm -rf ~/.config/omarchy/plugins/uplink
 
 This plugin's own cache of last-known host status
 (`~/.local/state/uplink/`), your saved bookmarks and settings
-(`~/.config/uplink/bookmarks.json`, `~/.config/uplink/settings.json`)
-all live outside the plugin directory, so `rm -rf` on the plugin folder
-alone won't clean any of it up -- delete it by hand if you uninstall
-manually and want a completely clean slate. **Your bookmarks' `Host`
-entries in `~/.ssh/config` are NOT removed by uninstalling the plugin** --
-they're real config entries at that point, by design (see Bookmarks
-below); delete them yourself from `~/.ssh/config` if you no longer want
-them, or use each bookmark's delete button before uninstalling.
+(`~/.config/uplink/bookmarks.json`, `~/.config/uplink/settings.json`), and
+its automatic `~/.ssh/config` backups (`~/.config/uplink/backups/`, plus
+the one-time `~/.ssh/config.pre-uplink.bak`) all live outside the plugin
+directory, so `rm -rf` on the plugin folder alone won't clean any of it
+up -- delete these by hand if you uninstall manually and want a
+completely clean slate. **Your bookmarks' `Host` entries in
+`~/.ssh/config` are NOT removed by uninstalling the plugin** -- they're
+real config entries at that point, by design (see Bookmarks below);
+delete them yourself from `~/.ssh/config` if you no longer want them, or
+use each bookmark's delete button before uninstalling.
 
 ## Usage
 
@@ -266,6 +270,12 @@ Click the **⚙** icon in the top-right of the popup for:
   validation as adding one by hand, so an imported entry that collides
   with an existing label (or fails validation) is skipped, not fatal to
   the rest of the import; you'll get a one-line summary either way.
+- **Backups** (behind its own "▸ Backups" expander within Settings) --
+  lists the last 15 automatic snapshots of `~/.ssh/config` (one is taken
+  before every write this plugin makes) with a human-readable timestamp,
+  each restorable with a two-click confirm. Restoring is itself
+  backed-up-and-undoable: whatever `~/.ssh/config` held right before the
+  restore gets its own fresh snapshot first, the same as any other write.
 
 ## How it works, briefly
 
@@ -314,6 +324,47 @@ embedded git-only server, is a real one) will authenticate fine but then
 refuse the SFTP request itself; GNOME Files shows this as its own "don't
 have permission to access the requested location" error. Nothing this
 plugin can do about that -- it's the remote server's own restriction.
+
+## Security
+
+This plugin has no bundled or third-party backend to trust -- every
+external call is to a system binary you already have installed (`ssh`,
+`bash`/`dd`, `ping`, `xfreerdp3`, `nautilus`, `sshpass`), invoked
+directly, never through a shell string built from untrusted input.
+
+- **No unnecessary privileges.** Nothing in this plugin's own code runs
+  `sudo`/`pkexec`, or otherwise elevates -- the one `sudo` you'll see is
+  user-facing instructional text (the openssh-missing banner) telling
+  *you* to run it yourself.
+- **Subprocess safety.** Every command is built and run as an argument
+  array (never a single interpolated shell string) except two reachability
+  probes, which do use `bash -c` to open a raw TCP socket -- there,
+  hostname/port are passed as bash *positional parameters* (`"$1"`/`"$2"`),
+  not spliced into the script text, specifically so a `HostName`/`Port`
+  value containing shell metacharacters (a realistic risk for a
+  non-bookmark `~/.ssh/config` entry, whose fields this plugin reads but
+  doesn't itself validate -- e.g. from a compromised dotfiles sync) is
+  substituted as inert text, not re-parsed as code. Verified live with a
+  deliberately malicious test value; see `DEV_TESTING.md` for the full
+  writeup.
+- **`~/.ssh/config` is only ever written on an explicit action of yours**
+  -- adding, editing, or deleting a bookmark; renaming or deleting a plain
+  host entry; or restoring a backup. Every one of those writes is preceded
+  by an automatic snapshot (see Backups above), and the file's `600`
+  permissions are restored immediately after.
+- **Stored passwords are plaintext, by explicit design**, not an
+  oversight -- `~/.config/uplink/bookmarks.json` is permission-hardened to
+  `600` but not encrypted, and a stored RDP password is passed to
+  `xfreerdp3` via its `/p:` flag, briefly visible in that process's own
+  argument list while it runs (a limitation of `xfreerdp3` itself, which
+  warns about this directly -- not something this plugin can avoid without
+  losing the "closes cleanly when the session ends" behavior a stored
+  password enables). See Bookmarks and Remote Desktop above for the full
+  reasoning and how to avoid it (leave the password field blank for an
+  interactive prompt instead).
+- **No telemetry, and no network access beyond what you directly
+  trigger** -- the periodic reachability probe, and any SSH/RDP/ping/SFTP
+  connection you click to open.
 
 ## License
 
