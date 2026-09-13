@@ -307,6 +307,70 @@ Item {
 
   Process { id: pruneRmProc; command: [] }
 
+  // ----------------------------------------------------------- backup restore
+
+  // [{filename, epochMs, label}], newest first -- populated on demand by
+  // refreshBackups() rather than kept live-updated, since the only reader
+  // is BackupsPanel and it already refreshes on every open.
+  property var backupsList: []
+
+  Process {
+    id: backupsListProc
+    command: []
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root._applyBackupsList(text) }
+  }
+
+  function refreshBackups() {
+    backupsListProc.command = ["ls", "-1", root.backupsDir]
+    backupsListProc.running = true
+  }
+
+  function _applyBackupsList(raw) {
+    var names = String(raw || "").split("\n").filter(function(n) { return /^config\.\d+\.bak$/.test(n) })
+    var list = names.map(function(n) {
+      var epochMs = Number(n.match(/\d+/)[0])
+      return { filename: n, epochMs: epochMs, label: new Date(epochMs).toLocaleString() }
+    })
+    list.sort(function(a, b) { return b.epochMs - a.epochMs })
+    root.backupsList = list
+  }
+
+  Process {
+    id: restoreReadProc
+    command: []
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root._applyRestoredConfig(text) }
+  }
+
+  // Restoring routes through the exact same _writeConfigText path every
+  // other config change already uses -- inherits its existing backup-
+  // before-write (the CURRENT, about-to-be-overwritten config gets backed
+  // up first, so a restore is itself undoable the same way), plus chmod
+  // and the external-sync guard, for free, rather than reimplementing any
+  // of that here.
+  function restoreBackup(filename) {
+    // Allow-lists the exact filename shape this store itself generates in
+    // _processWriteQueue -- refuses anything else outright. Defense in
+    // depth: the only caller is BackupsPanel, itself only ever populated
+    // from refreshBackups()'s own filtered listing, but this is a
+    // destructive file-read-then-overwrite operation, so it doesn't trust
+    // its argument on that basis alone.
+    if (!/^config\.\d+\.bak$/.test(filename)) return
+    restoreReadProc.command = ["cat", root.backupsDir + "/" + filename]
+    restoreReadProc.running = true
+  }
+
+  // A restored config can carry a different hostname/port/user (or no
+  // block at all) for any bookmark that was edited or created after the
+  // backup was taken -- re-syncs bookmark JSON against the newly-restored
+  // text immediately, rather than relying on the external-sync-guard
+  // machinery that exists for genuinely external hand-edits (this isn't
+  // one: _acceptExternalSync is already false during this plugin's own
+  // write below, so that path would never fire here on its own).
+  function _applyRestoredConfig(text) {
+    root._writeConfigText(text)
+    root._syncBookmarkFieldsFromConfig(text)
+  }
+
   // One-time safety backup, idempotent via `cp -n` (no-clobber -- copies
   // only if the destination doesn't already exist). Run once at startup
   // rather than per-write: every real write happens after the popup is

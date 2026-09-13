@@ -704,7 +704,54 @@ BarWidget {
     remoteDesktopCheckProc.running = true
   }
 
-  Component { id: remoteDesktopProcComponent; Process {} }
+  Component {
+    id: remoteDesktopProcComponent
+    Process {
+      id: proc
+      property string hostAlias: ""
+      property double startedAt: 0
+      property string capturedStderr: ""
+      // Only meaningful for the detached, stored-password launch path (see
+      // launchRemoteDesktop below) -- when a terminal wraps the launch
+      // instead, this process IS omarchy-launch-terminal, and its exit
+      // code/stderr say nothing about whether xfreerdp3 itself succeeded.
+      property bool detachedLaunch: false
+      stderr: StdioCollector {
+        waitForEnd: true
+        onStreamFinished: proc.capturedStderr = text
+      }
+      onExited: function(exitCode, exitStatus) {
+        if (proc.detachedLaunch) root._maybeNotifyRemoteDesktopFailure(proc.hostAlias, exitCode, Date.now() - proc.startedAt, proc.capturedStderr)
+        proc.destroy()
+      }
+    }
+  }
+
+  // Not gated behind settingsStore.notifyStatusChanges -- unlike a
+  // background status transition, this is a direct, immediate consequence
+  // of the user's own click, so it should always surface rather than
+  // require opting in first.
+  //
+  // Reported live: a stale stored RDP password produces a black window
+  // that opens and closes in well under a second, with zero feedback
+  // anywhere -- the detached launch (see launchRemoteDesktop) has no
+  // terminal to show xfreerdp3's own error output. Confirmed live against
+  // a real bad-password attempt: exit code 134, ~370ms elapsed, with
+  // "ERRCONNECT_LOGON_FAILURE" in stderr.
+  function _maybeNotifyRemoteDesktopFailure(alias, exitCode, elapsedMs, stderrText) {
+    if (exitCode === 0) return
+    // A real auth/connection failure exits fast (measured ~370ms live). A
+    // session the user actually used and closed normally exits code 0, so
+    // this threshold only needs to rule out a long-lived session ending in
+    // some other nonzero way (e.g. killed) -- generous on purpose, not
+    // tuned to the exact 370ms measurement.
+    if (elapsedMs > 10000) return
+    var reason = "Connection closed immediately (exit code " + exitCode + ")"
+    var m = String(stderrText || "").match(/\[ERROR\]\[[^\]]+\]\s*-\s*\[[^\]]+\]:\s*(.+)/)
+    if (m) reason = m[1].trim()
+    var omarchyPath = Quickshell.env("OMARCHY_PATH")
+    Quickshell.execDetached([omarchyPath + "/bin/omarchy-notification-send", "-u", "critical", "--app-name", "Uplink", alias + " RDP connection failed", reason])
+  }
 
   // Only "rdp" is wired up; "vnc" can't reach here while it's hidden from
   // the protocol selector, but this no-ops rather than misbehaving if a
@@ -722,7 +769,7 @@ BarWidget {
   // fixes this the same way it already does for SSH: briefly shows the
   // Domain/Username/Password prompt, then xfreerdp3 opens its own separate
   // window for the actual remote desktop session once authenticated.
-  function launchRemoteDesktop(protocol, hostname, rdpPort, rdpUser, rdpPassword) {
+  function launchRemoteDesktop(protocol, hostname, rdpPort, rdpUser, rdpPassword, alias) {
     if (!hostname || protocol !== "rdp") return
     var vArg = "/v:" + hostname + (rdpPort && rdpPort !== "3389" ? ":" + rdpPort : "")
     var args = ["xfreerdp3", vArg,
@@ -778,6 +825,7 @@ BarWidget {
     // silently failed until rdpUser was actually set on the bookmark.
     if (rdpUser) args.push("/u:" + rdpUser)
     var command
+    var detached = false
     if (rdpPassword) {
       // A stored password means xfreerdp3 can authenticate fully non-
       // interactively -- no terminal needed at all anymore, so this skips
@@ -790,6 +838,7 @@ BarWidget {
       // lingering to clean up.
       args.push("/p:" + rdpPassword)
       command = args
+      detached = true
     } else {
       // No stored password -- still needs the terminal for the
       // interactive Domain/Password prompt (xfreerdp3's CLI client has no
@@ -797,8 +846,7 @@ BarWidget {
       // on this).
       command = ["/usr/share/omarchy/bin/omarchy-launch-terminal"].concat(args)
     }
-    var proc = remoteDesktopProcComponent.createObject(root, { command: command })
-    proc.exited.connect(function() { proc.destroy() })
+    var proc = remoteDesktopProcComponent.createObject(root, { command: command, hostAlias: alias || hostname, startedAt: Date.now(), detachedLaunch: detached })
     proc.running = true
   }
 
@@ -1163,7 +1211,7 @@ BarWidget {
           remoteDesktopAvailable: root.remoteDesktopAvailable
           onConnectRequested: function(alias) { root.connectToHost(alias) }
           onBrowseRequested: function(uri) { root.openFileManager(uri) }
-          onRemoteDesktopRequested: function(protocol, hostname, port, user, password) { root.launchRemoteDesktop(protocol, hostname, port, user, password) }
+          onRemoteDesktopRequested: function(protocol, hostname, port, user, password, alias) { root.launchRemoteDesktop(protocol, hostname, port, user, password, alias) }
           onPingRequested: function(alias) { root.pingHost(alias) }
         }
       }

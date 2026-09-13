@@ -46,10 +46,21 @@ connections too, right alongside them.
   installed (`sudo pacman -S freerdp`); the button just doesn't appear
   otherwise. See its own section below.
 - **Export/import your bookmarks** as a plain JSON file.
+- **Restore a previous `~/.ssh/config`** from one of the last 15 automatic
+  backups, right from the settings panel -- no terminal needed. Restoring
+  itself makes a fresh backup of whatever it's about to replace first, so
+  it's undoable the same way.
+- **A desktop notification if a saved RDP password stops working** --
+  without one, that connection type closes silently and instantly with no
+  other feedback anywhere.
 - **Configurable probe cadence and a compact row mode**, both in a small
   in-popup settings panel.
 - **Theme-native** status colors, matching the active Omarchy theme's own
-  palette.
+  palette -- with a safety net for a handful of intentionally
+  monochromatic themes (Lumon, White, Vantablack, Hackerman) whose own
+  red/green aren't different enough to tell an up host from a down one at
+  a glance: up/down automatically fall back to a fixed, always-distinct
+  green/red pair on those specific themes, every other theme unaffected.
 - **Bar-aware popup placement**, matching how native Omarchy plugins behave:
   centered on screen if the icon sits in the center of the bar, edge-aligned
   if it's been moved to the left or right section.

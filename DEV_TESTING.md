@@ -1055,3 +1055,146 @@ bug-squashing/optimization passes already documented above.
   RDP-protocol-probe and Ping additions to make sure neither had
   silently broken that invariant.
 - Version bumped to 3.0.1 (cleanup/perf, no user-facing feature change).
+
+**Status dot indistinguishable on some themes, fixed with a calibrated
+safety net (2026-09-13)** -- reported live: on the shipped "Lumon" theme,
+a real down host (Portainer) rendered the exact same dot color as every
+reachable one. Root cause: `ThemeStatusColors.statusColors()` maps
+up/down straight from the active theme's own `green`/`red` keys in
+`colors.toml`, with no check that those two values are actually
+different enough to tell apart -- Lumon is a deliberately monochromatic
+blue-on-blue palette (`red = "#4d86b0"`, `green = "#5e95bc"`, an
+Euclidean RGB distance of only ~25.7), so its own "red" and "green" read
+as the same color at a 9px dot size. Confirmed this isn't a Lumon-only
+problem: measured every shipped theme's own red/green distance directly
+from its `colors.toml` (not guessed) and found three more with the
+identical issue for the same underlying reason (an intentionally
+limited palette) -- White (~27.7, literal grayscale), Vantablack
+(~31.2, ditto), Hackerman (~33.1, an all-green "hacker" palette where
+its own "red" is itself a shade of green). Every other shipped theme
+measured 56.8 or higher, a comfortable gap above the broken cluster.
+- Also checked and ruled out as a fallback: Quickshell's own
+  `Color.urgent` (the shell's shared semantic "danger" role) is NOT a
+  safe substitute here -- reading `Color.qml` directly confirmed
+  `urgent` is itself sourced from the theme's own `red`/`color1` slot,
+  so for exactly the themes this needs to protect against, `Color.urgent`
+  would be just as broken as the theme's own red.
+- Fix, in `ThemeStatusColors.js`: added a plain Euclidean RGB
+  `_colorDistance()` check between the resolved up/down candidates; below
+  a threshold of 45 (picked to sit in the middle of the measured 33.1-to-
+  56.8 gap with comfortable margin either side), both up AND down are
+  overridden together with a fixed, non-theme-derived safe pair
+  (`#4caf50`/`#f44336`) -- swapped as a matched pair, never individually,
+  so a theme with a fine "up" but a too-close "down" doesn't end up
+  mixing one native color with one fixed one. "checking" (muted) is
+  untouched -- checked and confirmed it doesn't collide with red/green on
+  any shipped theme, and it's a lower-stakes state than up/down anyway.
+- Verified live end-to-end, not just by inspection: actually switched the
+  running shell to the real Lumon theme (`omarchy theme set lumon`),
+  confirmed via a temporary `debugColors()` hook that
+  `colorForStatus("up")`/`("down")`/`("checking")` resolve to
+  `#4caf50`/`#f44336`/`#304860` (the last one Lumon's own native muted
+  color, confirming the fix is scoped to exactly up/down and nothing
+  else); then added a real temporary bookmark pointed at a non-routable
+  TEST-NET-3 address (`ZZDebugDownHost`, safe/no real traffic) to get an
+  actual "down" status through the real probe pipeline rather than
+  faking it, and confirmed via a cropped/zoomed screenshot that it
+  rendered a clearly distinct RED dot next to a real host's GREEN one --
+  the exact failure mode reported, now fixed. Cleaned up the test
+  bookmark and reverted the theme to Tokyo Night (the user's actual
+  theme) afterward, confirmed via `omarchy theme current` and a
+  `bookmarks.json` dump that both were back to exactly their prior state.
+  Also confirmed Tokyo Night itself (a theme well above the distance
+  threshold) still uses its own native colors unchanged -- the fix only
+  intervenes for the specific themes that need it.
+
+**Silent RDP auth failure now surfaces a notification (2026-09-13)** --
+gap identified during a pre-push review, not a live bug report: a
+bookmark with a stored RDP password launches xfreerdp3 fully detached
+(no terminal -- that's what makes "window closes when the session ends"
+work for free), so a stale/wrong password produced a black window that
+opened and closed in well under a second with zero explanation anywhere.
+- Measured the real failure signature directly before writing any fix
+  code: ran `xfreerdp3` by hand against a real host (RedOak) with a
+  deliberately wrong password. Exit code 134, ~370ms elapsed, with
+  `[ERROR][com.freerdp.core] - [nla_recv_pdu]: ERRCONNECT_LOGON_FAILURE`
+  in stderr -- confirmed a fast nonzero exit is a reliable, real signal
+  to build a heuristic on, not a guess.
+- Fix, in `BarWidget.qml`: `remoteDesktopProcComponent` now captures
+  stderr via a `StdioCollector` and records a `startedAt` timestamp; a
+  new `detachedLaunch` property (true only on the stored-password/no-
+  terminal path -- the no-password, terminal-wrapped path is left alone,
+  since that process is `omarchy-launch-terminal`, not xfreerdp3, and its
+  exit code says nothing about the RDP session) gates a new
+  `_maybeNotifyRemoteDesktopFailure()` call from the process's `onExited`.
+  That function no-ops on exit code 0, no-ops if the process ran longer
+  than 10s (generous margin above the measured ~370ms, meant only to
+  rule out a long session ending some other nonzero way), then fires an
+  `omarchy-notification-send` critical notification -- reusing the exact
+  same `execDetached` mechanism `_maybeNotifyStatusChange` already uses --
+  with the specific FreeRDP `[ERROR]...:` line extracted from stderr as
+  the notification body when present, falling back to a generic "exit
+  code N" message otherwise.
+- Deliberately NOT gated behind the `notifyStatusChanges` setting (unlike
+  the existing up/down notifications): this is a direct, immediate
+  consequence of the user's own click, not a background transition, so
+  it should always surface rather than require opting in first.
+- Verified live end-to-end: added a temporary `debugRdpFail()` IPC hook
+  that called `launchRemoteDesktop()` with a real host and a deliberately
+  wrong password, called it twice via
+  `qs -p /usr/share/omarchy/shell ipc call jmthomas00.uplink debugRdpFail`,
+  and confirmed via screenshot two real desktop notifications reading
+  "TestAlias RDP connection failed / ERRCONNECT_LOGON_FAILURE
+  [0x00020014]" -- the actual FreeRDP error, not a generic message.
+  Removed the debug hook afterward (confirmed via `grep -rn "debug"
+  *.qml` returning empty) and deleted the screenshot.
+
+**Backup restore UI (2026-09-13)** -- gap identified during the same pre-
+push review: the rolling backup system (`BookmarkStore`'s
+`~/.config/uplink/backups/config.<epoch>.bak`, 15 rolling snapshots, one
+written before every write to `~/.ssh/config`) had no restore path exposed
+anywhere in the plugin -- recovering from a corrupted/bad hand-edit meant
+manually `cp`-ing a backup file from a terminal.
+- New `BookmarkStore.qml` functions: `refreshBackups()` (lists
+  `backupsDir`, filters to the same `config.\d+.bak` shape
+  `_applyPrune` already uses, sorts newest-first) populating a new
+  `backupsList` property (`[{filename, epochMs, label}]`, `label` a
+  locale-formatted date string); `restoreBackup(filename)` (allow-lists
+  the exact filename shape as defense in depth, `cat`s the file, then
+  routes the content through the exact same `_writeConfigText()` path
+  every other config write already uses -- so a restore is itself
+  backed-up-and-undoable for free, with the same chmod/external-sync-
+  guard behavior, no new write path reimplemented). Also calls
+  `_syncBookmarkFieldsFromConfig()` explicitly against the newly-restored
+  text right after writing it, since `_acceptExternalSync` is already
+  false during this plugin's own write and wouldn't otherwise trigger
+  that re-sync -- needed because a restored (older) config can carry
+  different hostname/port/user for any bookmark edited or created after
+  that backup was taken.
+- New `BackupsPanel.qml`: lists `backupsList` with a two-click "Restore?"
+  confirm button per row (same idiom as `HostRow`'s delete-confirm, one
+  shared `confirmingFilename` + 3s reset timer rather than per-row state,
+  since only one restore is ever in flight). Wired into `SettingsPanel.qml`
+  as a new expandable "▸ Backups" section, exact structural copy of the
+  existing "▸ Export/Import" section.
+- Verified live end-to-end, not just by inspection: added a temporary
+  `debugOpenBackups()` IPC hook (plus a temporary `id`/alias on
+  `HostList`'s `SettingsPanel` instance to reach into it) and screenshotted
+  the real Backups section listing all 15 real, pre-existing backups with
+  correct human-readable timestamps. Then added a second temporary
+  `debugRestore(filename)` hook and ran a full real restore: captured
+  `~/.ssh/config`'s original md5sum, restored the oldest of the 15 real
+  backups, confirmed the live file's md5sum now exactly matched that
+  backup's, confirmed a fresh backup of the pre-restore state was created
+  automatically (`_writeConfigText`'s existing backup-before-write
+  behavior, unmodified), and confirmed the restore's own extra write
+  correctly pruned the list back to 15 (the just-restored-from file,
+  being the oldest, was itself the one pruned -- expected, not a bug: its
+  content was already live in `~/.ssh/config` by that point). Restored the
+  pre-restore snapshot back afterward to return the real config to its
+  exact original content (verified via md5sum match). Removed both debug
+  hooks and the temporary SettingsPanel id/alias afterward (confirmed via
+  `grep -rn "debug" *.qml` returning empty) and deleted the screenshot.
+  Confirmed bookmarks.json (7 real bookmarks), the real backups directory
+  (still 15 files), and the active theme (Tokyo Night) were all unchanged
+  by this test.

@@ -13,6 +13,7 @@ Item {
   property var settingsStoreRef: null
   property var bookmarkStoreRef: null
   property bool exportImportOpen: false
+  property bool backupsOpen: false
 
   implicitWidth: Style.space(360)
   implicitHeight: column.implicitHeight
@@ -22,7 +23,10 @@ Item {
       probeIntervalField.value = root.settingsStoreRef.probeIntervalSec
       popupIntervalField.value = root.settingsStoreRef.popupProbeIntervalSec
     }
-    if (!visible) root.exportImportOpen = false
+    if (!visible) {
+      root.exportImportOpen = false
+      root.backupsOpen = false
+    }
   }
 
   Column {
@@ -129,6 +133,27 @@ Item {
 
     ExportImportPanel {
       visible: root.exportImportOpen
+      width: parent.width
+      bookmarkStoreRef: root.bookmarkStoreRef
+    }
+
+    Text {
+      text: (root.backupsOpen ? "▾" : "▸") + " Backups"
+      color: root.backupsOpen ? Color.accent : Qt.darker(Color.foreground, 1.3)
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+
+      MouseArea {
+        anchors.fill: parent
+        anchors.margins: -Style.space(4)
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.backupsOpen = !root.backupsOpen
+      }
+    }
+
+    BackupsPanel {
+      visible: root.backupsOpen
       width: parent.width
       bookmarkStoreRef: root.bookmarkStoreRef
     }

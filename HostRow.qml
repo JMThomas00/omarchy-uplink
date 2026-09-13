@@ -94,7 +94,7 @@ Column {
   signal deleteRequested(string bookmarkId)
   signal browseRequested(string uri)
   signal favoriteRequested(string bookmarkId)
-  signal remoteDesktopRequested(string protocol, string hostname, string port, string user, string password)
+  signal remoteDesktopRequested(string protocol, string hostname, string port, string user, string password, string alias)
 
   width: Style.space(570)
   spacing: Style.spacing.xxs
@@ -442,7 +442,7 @@ Column {
           // comment on why one shared field can't represent both services
           // on the same host -- a real Windows account name like "Jordan
           // Thomas" also isn't valid in the SSH `user` field's charset).
-          onClicked: if (root.host) root.remoteDesktopRequested(root.host.protocol, root.host.hostname, root.host.rdpPort, root.host.rdpUser, root.host.rdpPassword)
+          onClicked: if (root.host) root.remoteDesktopRequested(root.host.protocol, root.host.hostname, root.host.rdpPort, root.host.rdpUser, root.host.rdpPassword, root.host.alias)
         }
       }
     }

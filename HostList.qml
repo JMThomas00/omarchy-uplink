@@ -56,7 +56,7 @@ Column {
   signal connectRequested(string alias)
   signal pingRequested(string alias)
   signal browseRequested(string uri)
-  signal remoteDesktopRequested(string protocol, string hostname, string port, string user, string password)
+  signal remoteDesktopRequested(string protocol, string hostname, string port, string user, string password, string alias)
 
   width: Style.space(570)
   spacing: Style.spacing.panelGap
@@ -440,7 +440,7 @@ Column {
             onDeleteRequested: function(bookmarkId) { if (root.bookmarkStoreRef) root.bookmarkStoreRef.deleteBookmark(bookmarkId) }
             onBrowseRequested: function(uri) { root.browseRequested(uri) }
             onFavoriteRequested: function(bookmarkId) { if (root.bookmarkStoreRef) root.bookmarkStoreRef.setFavorite(bookmarkId, !modelData.favorite) }
-            onRemoteDesktopRequested: function(protocol, hostname, port, user, password) { root.remoteDesktopRequested(protocol, hostname, port, user, password) }
+            onRemoteDesktopRequested: function(protocol, hostname, port, user, password, alias) { root.remoteDesktopRequested(protocol, hostname, port, user, password, alias) }
           }
         }
       }
