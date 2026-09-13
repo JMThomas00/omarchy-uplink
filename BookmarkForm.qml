@@ -18,7 +18,6 @@ Item {
   property string initialHostname: ""
   property string initialPort: "22"
   property string initialUser: ""
-  property string initialMac: ""
   property string initialGroup: ""
   property string initialNotes: ""
   property string initialIcon: ""
@@ -49,7 +48,6 @@ Item {
       user: userField.text,
       group: groupField.text,
       icon: iconField.text,
-      mac: macField.text,
       notes: notesField.text,
       favorite: root.favoriteValue,
       protocol: root.protocolValue,
@@ -102,7 +100,6 @@ Item {
     userField.text = root.initialUser
     groupField.text = root.initialGroup
     iconField.text = root.initialIcon
-    macField.text = root.initialMac
     notesField.text = root.initialNotes
     root.favoriteValue = root.initialFavorite
     root.protocolValue = root.initialProtocol || "ssh"
@@ -115,7 +112,7 @@ Item {
     // text when switching straight to editing a different one.
     root.passwordRevealed = false
     root.rdpPasswordRevealed = false
-    root.advancedOpen = root.initialMac !== "" || root.initialNotes !== ""
+    root.advancedOpen = root.initialNotes !== ""
     root.errorText = ""
     labelField.forceActiveFocus()
   }
@@ -169,6 +166,17 @@ Item {
         to: 65535
         fieldWidth: Style.space(80)
         field.Keys.onReturnPressed: root._submit()
+        // Qt's default SpinBox.textFromValue does locale-aware grouping
+        // (`Number(value).toLocaleString(locale, 'f', 0)`) -- reported
+        // live: a port >= 1000 (e.g. the RDP field's own 3389 default)
+        // displayed as "3,389". A port number is never meant to read as a
+        // large-magnitude quantity, so plain digits are correct here
+        // regardless of locale -- this NumberField is a shared Ui
+        // component (qs.Ui, not owned by this plugin's own repo), so
+        // fixed by overriding just these two callbacks on the exposed
+        // `field` (SpinBox) alias rather than touching that file.
+        field.textFromValue: function(value, locale) { return String(value) }
+        field.valueFromText: function(text, locale) { return parseInt(String(text).replace(/[^0-9]/g, ""), 10) || 0 }
       }
 
       TextField {
@@ -284,7 +292,7 @@ Item {
       // closed with it. A Windows host's SSH port (if it even runs one) and
       // its RDP port are two independent services on two different ports by
       // default (22 vs 3389); one shared field can't represent both. This
-      // field is JSON-only, like mac/group/notes/icon -- never written into
+      // field is JSON-only, like group/notes/icon -- never written into
       // ~/.ssh/config (that block's own Port line still comes from the SSH
       // `Port` field above, unaffected).
       Row {
@@ -299,6 +307,12 @@ Item {
           to: 65535
           fieldWidth: Style.space(80)
           field.Keys.onReturnPressed: root._submit()
+          // See portField's own comment above -- same fix, same reason
+          // (this default of 3389 is exactly the value that surfaced the
+          // bug: Qt's default locale-grouped SpinBox formatting showed
+          // "3,389").
+          field.textFromValue: function(value, locale) { return String(value) }
+          field.valueFromText: function(text, locale) { return parseInt(String(text).replace(/[^0-9]/g, ""), 10) || 0 }
         }
 
         // NOT the SSH `User` field above -- deliberately, not just for the
@@ -442,15 +456,6 @@ Item {
       visible: root.advancedOpen
       width: parent.width
       spacing: Style.spacing.md
-
-      TextField {
-        id: macField
-        width: parent.width
-        placeholderText: "MAC address (optional, for Wake-on-LAN)"
-        verticalPadding: Style.spacing.controlPaddingY
-        onAccepted: root._submit()
-        Keys.onEscapePressed: root.cancelled()
-      }
 
       TextField {
         id: notesField

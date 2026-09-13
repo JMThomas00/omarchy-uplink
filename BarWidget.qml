@@ -20,7 +20,9 @@ import "ThemeStatusColors.js" as ThemeStatusColors
 // One-shot Process on a Timer per host, mirroring Linecast's own shape
 // rather than Waveform's reactive-service pattern (there is no
 // PipeWire-style live service here to bind to): an SSH banner grab
-// (`timeout N bash -c 'exec 3<>/dev/tcp/H/P && dd bs=64 count=1 <&3'`),
+// (`timeout N bash -c 'exec 3<>/dev/tcp/"$1"/"$2" && dd bs=64 count=1 <&3' _ H P`,
+// H/P passed as positional parameters, never string-concatenated into the
+// script -- see _runTcpProbe's own comment for why),
 // checking the response starts with "SSH-". No auth attempted, so it works
 // identically regardless of the host's auth method -- confirmed live: a
 // plain TCP connect (the original v1 design) can't tell a real sshd apart
@@ -52,14 +54,26 @@ BarWidget {
 
   // ------------------------------------------------------------------ hosts
   //
-  // { alias, hostname, port, user, status, lastCheckedAt }
+  // { alias, hostname, port, user, status, lastCheckedAt, source,
+  //   latencyMs, connected, configMissing, pingStatus }
   // status: "checking" | "up" | "down"
   //   checking -- not yet probed this session / probe in flight
-  //   up       -- the banner probe confirmed a real SSH server -- independent
-  //               of auth method, so this is accurate for both key- and
-  //               password-auth hosts.
-  //   down     -- Stage A failed (timeout, refused, or something answered
-  //               that wasn't a real SSH server)
+  //   up       -- the probe succeeded: for an SSH-primary host, a real SSH
+  //               banner ("SSH-...") was seen -- independent of auth
+  //               method, so this is accurate for both key- and
+  //               password-auth hosts; for an RDP-primary bookmark (see
+  //               _runTcpProbe), just a bare TCP connect to rdpPort, since
+  //               RDP's binary handshake has no readable banner to check.
+  //   down     -- the probe failed (timeout, refused, or -- SSH-primary
+  //               only -- something answered that wasn't a real SSH server)
+  // source: "bookmark" | "config" -- which section of the popup this alias
+  //   belongs under; configMissing (bookmark-only) marks a row whose
+  //   ~/.ssh/config block was hand-deleted, excluding it from probing until
+  //   restored (see _onSshConfigChanged/_syncMissingBookmarkRows). Every
+  //   other field not listed here (group/notes/icon/favorite/protocol/
+  //   rdpPort/rdpUser/password/rdpPassword) only ever exists on the merged
+  //   display object HostList builds for a bookmark row, never on the plain
+  //   objects in this array -- see HostList._displayHostForBookmark.
   property var hosts: []
   property bool sawInclude: false
 
@@ -152,14 +166,20 @@ BarWidget {
     return null
   }
 
-  function _patchHost(alias, patch) {
+  // `skipSave` exists for pingStatus specifically: `_saveCache` never
+  // writes that field at all (see its own object literal below), so
+  // scheduling a debounced disk write to persist a value that gets
+  // immediately dropped by the serializer is pure waste -- a single Ping
+  // click patches twice ("pending", then the result), each of which used
+  // to trigger its own status-cache.json write for nothing.
+  function _patchHost(alias, patch, skipSave) {
     var found = false
     root.hosts = root.hosts.map(function(h) {
       if (h.alias !== alias) return h
       found = true
       return Object.assign({}, h, patch)
     })
-    if (found) root._scheduleSave()
+    if (found && !skipSave) root._scheduleSave()
   }
 
   // ------------------------------------------------------------- ~/.ssh/config
@@ -336,7 +356,18 @@ BarWidget {
       // RDP-specific port is a much rarer false positive in practice than
       // on a commonly-multiplexed port like SSH's.
       var rdpPort = (bookmark.rdpPort || "3389")
-      cmd = ["timeout", "3", "bash", "-c", "echo > /dev/tcp/" + host.hostname + "/" + rdpPort]
+      // hostname/port passed as bash POSITIONAL PARAMETERS ($1/$2), never
+      // spliced directly into the script string -- see the SSH branch's
+      // own comment below for why this matters: a bookmark's hostname is
+      // charset-restricted, but a plain (non-bookmark) ~/.ssh/config
+      // host's hostname comes straight from `ssh -G`'s raw output with no
+      // such restriction, so an unsanitized string-concat here would be a
+      // real shell-injection surface for anyone who can get an attacker-
+      // controlled HostName into that file (a compromised dotfiles sync,
+      // for instance) -- confirmed live that a hostname containing `;
+      // touch ... #` a) does NOT execute the injected command, and b)
+      // correctly fails as an invalid connection target instead.
+      cmd = ["timeout", "3", "bash", "-c", "echo > /dev/tcp/\"$1\"/\"$2\"", "_", host.hostname, rdpPort]
     } else {
       // `&&` means dd only ever runs once the TCP connect itself succeeds --
       // a refused/timed-out connect leaves bash exiting non-zero with no
@@ -357,8 +388,29 @@ BarWidget {
       // and nothing else until the client replies, so one read is *all*
       // there ever is to get non-interactively -- `timeout 3` still bounds
       // the whole thing generously for a slow LAN hop.
+      //
+      // hostname/port passed as bash POSITIONAL PARAMETERS ($1/$2) via a
+      // trailing argv tail, NOT spliced directly into the script string
+      // via `+` concatenation (the original shape here, before this was
+      // fixed as a pre-marketplace-submission hardening pass). A bookmark's
+      // own hostname is charset-restricted (BookmarkStore's `_hostRe`), but
+      // a PLAIN (non-bookmark) ~/.ssh/config host's hostname/port come
+      // straight from `ssh -G`'s raw resolved-config output with no such
+      // restriction -- `parseResolvedConfig`'s own regex only excludes
+      // whitespace, not shell metacharacters. String-concatenating that
+      // into a `bash -c` script would be a real command-injection surface
+      // for anyone who can get an attacker-controlled HostName/Port into
+      // that file (a compromised dotfiles sync being the realistic case,
+      // not just a self-inflicted hand-edit). `bash -c 'script' _ "$1" "$2"`
+      // is the standard-safe pattern instead: bash performs ordinary
+      // parameter expansion on `"$1"`/`"$2"` (substituting the literal
+      // VALUE, not re-parsing it as code), so even a value containing
+      // `$(...)`/backticks/`;` is inserted as inert text -- confirmed live
+      // both that a normal hostname still connects correctly, AND that an
+      // injected `; touch ... #` payload does NOT execute (fails instead as
+      // an invalid `/dev/tcp/` target, exactly the same as a typo would).
       cmd = ["timeout", "3", "bash", "-c",
-        "exec 3<>/dev/tcp/" + host.hostname + "/" + host.port + " && dd bs=64 count=1 <&3 2>/dev/null"]
+        "exec 3<>/dev/tcp/\"$1\"/\"$2\" && dd bs=64 count=1 <&3 2>/dev/null", "_", host.hostname, host.port]
     }
     var proc = bannerProbeComponent.createObject(root, { command: cmd, hostAlias: alias, startedAtMs: Date.now(), isRdpProbe: isRdpPrimary })
     proc.running = true
@@ -532,39 +584,9 @@ BarWidget {
     function onPopupProbeIntervalSecChanged() { connectedPollTimer.restart() }
   }
 
-  // -------------------------------------------------------------- Wake-on-LAN
-  //
-  // Mirrors Waveform's own optional-dependency pattern (_checkDependencies,
-  // lspEqAvailable/cavaAvailable) rather than hand-rolling a magic-packet
-  // sender -- checked via a single REUSED static Process guarded by
-  // `!wakeonlanCheckProc.running`, not the per-host createObject() pattern
-  // the probes above use, since this is one fixed check, not an N-host one.
-  property bool wakeonlanAvailable: true
-
-  Process {
-    id: wakeonlanCheckProc
-    command: []
-    onExited: function(exitCode) { root.wakeonlanAvailable = exitCode === 0 }
-  }
-
-  function _checkWakeonlan() {
-    if (wakeonlanCheckProc.running) return
-    wakeonlanCheckProc.command = ["which", "wakeonlan"]
-    wakeonlanCheckProc.running = true
-  }
-
-  Component { id: wakeProcComponent; Process {} }
-
-  function wakeHost(mac) {
-    if (!mac) return
-    var proc = wakeProcComponent.createObject(root, { command: ["wakeonlan", mac] })
-    proc.exited.connect(function() { proc.destroy() })
-    proc.running = true
-  }
-
   // ------------------------------------------------------- Browse (SFTP)
   //
-  // Same optional-dependency shape as Wake-on-LAN above. `xdg-open
+  // Same optional-dependency shape as sshpass/xfreerdp3 below. `xdg-open
   // sftp://...` has no registered handler on this system (confirmed:
   // `gio mime x-scheme-handler/sftp` -> "No default applications") --
   // launching nautilus directly with the URI works regardless of that
@@ -594,9 +616,46 @@ BarWidget {
     proc.running = true
   }
 
+  // ------------------------------------------------------------- openssh
+  //
+  // Unlike nautilus/sshpass/xfreerdp3 below, `ssh` was never
+  // gated on an availability check at all -- every other optional
+  // integration in this file gracefully hides its own feature when
+  // missing, but the CORE feature (SSH reachability/connect) just
+  // silently assumed `ssh` existed. That assumption holds on this
+  // machine (already customized) but not necessarily on a genuinely
+  // fresh Omarchy install: confirmed by reading
+  // /usr/share/omarchy/install/omarchy-base.packages and
+  // omarchy-other.packages directly that `openssh` is NOT in either
+  // list, and isn't pulled in as a dependency of anything else Omarchy
+  // does install (checked via `pacman -Si openssh`'s own "Required By").
+  // Without this, a bare install missing openssh would show every host
+  // stuck on "checking" forever with zero indication why -- `ssh -G`
+  // (alias resolution) fails to even start, so `host.hostname` never
+  // gets populated, so `_runTcpProbe`'s own `if (!host.hostname) return`
+  // guard silently skips every host, indefinitely. Surfaced as a banner
+  // in HostList (see its own opensshAvailable-gated Text) rather than
+  // dimming individual buttons -- unlike the other optional tools, this
+  // isn't "one feature is unavailable," it's "nothing here can work
+  // until this is fixed," which calls for one unmissable message instead
+  // of scattered dimmed buttons that would leave the actual cause unclear.
+  property bool opensshAvailable: true
+
+  Process {
+    id: opensshCheckProc
+    command: []
+    onExited: function(exitCode) { root.opensshAvailable = exitCode === 0 }
+  }
+
+  function _checkOpenssh() {
+    if (opensshCheckProc.running) return
+    opensshCheckProc.command = ["which", "ssh"]
+    opensshCheckProc.running = true
+  }
+
   // --------------------------------------------------------------- sshpass
   //
-  // Same optional-dependency shape as Wake-on-LAN/Browse. A stored SSH
+  // Same optional-dependency shape as Browse above. A stored SSH
   // password (2026-09-12) is fed to `ssh` non-interactively via `sshpass`
   // -- plain `ssh` has no CLI flag for a password at all (deliberately, by
   // design). Without sshpass installed, connectToHost falls back to
@@ -618,7 +677,7 @@ BarWidget {
 
   // ------------------------------------------------------------------ RDP
   //
-  // Same optional-dependency shape as Wake-on-LAN/Browse above. Switched
+  // Same optional-dependency shape as Browse above. Switched
   // from Remmina to xfreerdp3 directly (2026-09-12) -- Remmina's own
   // connection-window embedding needs GtkSocket/XEmbed (X11-only, doesn't
   // exist under Wayland; workaround was GDK_BACKEND=x11) and its RDP/VNC
@@ -746,7 +805,7 @@ BarWidget {
   // ------------------------------------------------------------------ ping
   //
   // Deliberately NOT gated behind an availability check the way xfreerdp3/
-  // sshpass/wakeonlan/nautilus are above -- `ping` (iputils) is a base
+  // sshpass/nautilus are above -- `ping` (iputils) is a base
   // system utility on every mainstream Linux distro including this one,
   // same trust level as ssh/bash/timeout per this file's own header
   // comment. A one-shot, user-requested ICMP echo test, entirely separate
@@ -775,7 +834,7 @@ BarWidget {
   function pingHost(alias) {
     var host = root._hostByAlias(alias)
     if (!host || !host.hostname) return
-    root._patchHost(alias, { pingStatus: "pending" })
+    root._patchHost(alias, { pingStatus: "pending" }, true)
     // `timeout 4` guards against a slow/hanging DNS lookup for a hostname
     // target -- `-W 2` only bounds the wait for a reply AFTER the ping
     // itself gets a packet out, not the resolution step before it. Same
@@ -794,7 +853,7 @@ BarWidget {
   function _applyPingResult(alias, raw) {
     var m = String(raw || "").match(/time=([\d.]+)\s*ms/)
     var result = m ? Math.round(parseFloat(m[1])) + "ms" : "timeout"
-    root._patchHost(alias, { pingStatus: result })
+    root._patchHost(alias, { pingStatus: result }, true)
   }
 
   // ------------------------------------------------------- state/cache
@@ -868,7 +927,7 @@ BarWidget {
     onExited: stateFile.reload()
   }
 
-  Component.onCompleted: { mkdirProc.running = true; root._checkWakeonlan(); root._checkFileManager(); root._checkRemoteDesktop(); root._checkSshpass() }
+  Component.onCompleted: { mkdirProc.running = true; root._checkOpenssh(); root._checkFileManager(); root._checkRemoteDesktop(); root._checkSshpass() }
 
   // --------------------------------------------------------------- theming
   //
@@ -900,7 +959,7 @@ BarWidget {
   }
 
   onOpenedChanged: {
-    if (root.opened) { themeColorsFile.reload(); root._probeAll(); root._pollConnected(); root._checkWakeonlan(); root._checkFileManager(); root._checkRemoteDesktop(); root._checkSshpass() }
+    if (root.opened) { themeColorsFile.reload(); root._probeAll(); root._pollConnected(); root._checkOpenssh(); root._checkFileManager(); root._checkRemoteDesktop(); root._checkSshpass() }
     else if (contentLoader.item) contentLoader.item.selectedRowKey = ""
   }
 
@@ -1099,11 +1158,10 @@ BarWidget {
           settingsStoreRef: settingsStore
           sawInclude: root.sawInclude
           statusColorFor: root.colorForStatus
-          wakeonlanAvailable: root.wakeonlanAvailable
+          opensshAvailable: root.opensshAvailable
           fileManagerAvailable: root.fileManagerAvailable
           remoteDesktopAvailable: root.remoteDesktopAvailable
           onConnectRequested: function(alias) { root.connectToHost(alias) }
-          onWakeRequested: function(mac) { root.wakeHost(mac) }
           onBrowseRequested: function(uri) { root.openFileManager(uri) }
           onRemoteDesktopRequested: function(protocol, hostname, port, user, password) { root.launchRemoteDesktop(protocol, hostname, port, user, password) }
           onPingRequested: function(alias) { root.pingHost(alias) }

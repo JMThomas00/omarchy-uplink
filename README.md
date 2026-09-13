@@ -1,7 +1,7 @@
 # Uplink for Omarchy
 
-Live reachability, uptime, and one-click terminal launch for every host in
-your `~/.ssh/config` -- right from the bar. Save your own bookmarked
+Live reachability and one-click SSH/RDP launch for every host in your
+`~/.ssh/config` -- right from the bar. Save your own bookmarked
 connections too, right alongside them.
 
 ## Features
@@ -12,17 +12,14 @@ connections too, right alongside them.
   exactly as a manual `ssh <alias>` would.
 - **Bookmark a connection by label + host/IP** -- click "+ Add" under
   Bookmarks, give it a name and a host, and it shows up immediately with
-  the same live status dot, uptime, and Connect button as everything else.
-  Edit or delete any bookmark you've added from its row.
-- **A status dot per host** -- grey while checking, green as soon as a real
-  SSH server answers (checked via its own protocol banner, no login
-  required, so this is accurate whether the host uses password or key
-  auth), red when it's unreachable.
-- **Live uptime, when this machine has passwordless key access** -- fetched
-  non-interactively, never blocks or hangs on a password prompt. A host
-  that needs a password just shows "--" for uptime instead of freezing the
-  UI or dragging the status dot down -- the dot only ever reflects whether
-  SSH itself is actually up.
+  the same live status dot and SSH button as everything else. Edit or
+  delete any bookmark you've added from its row.
+- **A status dot per host** -- grey while checking, green as soon as it's
+  reachable, red when it's not. For an SSH-primary host this checks the
+  real SSH protocol banner (no login required, so it's accurate whether
+  the host uses password or key auth); for an RDP-primary bookmark it
+  checks the RDP port instead, since a Windows RDP-only box may not run
+  SSH at all.
 - **One-click connect** -- opens a real terminal already running
   `ssh <alias>`, using whatever terminal you've actually got configured.
 - **Browse files** -- a small 📁 button opens the host's filesystem in
@@ -38,17 +35,14 @@ connections too, right alongside them.
   used), leave yourself a note on any host, and pin a quick visual glyph
   next to its name.
 - **A "currently connected" indicator** -- shows when a host has a live
-  `ssh` session open, whether you started it from this widget's Connect
+  `ssh` session open, whether you started it from this widget's SSH
   button or a terminal you opened by hand.
-- **Wake-on-LAN** -- save a MAC address on a bookmark and wake a sleeping
-  host with one click (needs `wakeonlan` installed; the button just won't
-  show if it isn't).
 - **Ping** -- a one-click ICMP reachability check, separate from the SSH
   status dot. Useful for a host that's on the network but doesn't run SSH
   (a Windows RDP-only box, for instance) -- the result (round-trip time,
   or "timeout") shows right in the button for a few seconds.
 - **Remote Desktop (RDP)**, via `xfreerdp3` -- set a bookmark's protocol to
-  RDP and an "RDP" button appears next to Connect. Needs `freerdp`
+  RDP and an "RDP" button appears next to SSH. Needs `freerdp`
   installed (`sudo pacman -S freerdp`); the button just doesn't appear
   otherwise. See its own section below.
 - **Export/import your bookmarks** as a plain JSON file.
@@ -59,6 +53,35 @@ connections too, right alongside them.
 - **Bar-aware popup placement**, matching how native Omarchy plugins behave:
   centered on screen if the icon sits in the center of the bar, edge-aligned
   if it's been moved to the left or right section.
+
+## Requirements
+
+Everything below except `openssh` is either already part of a stock
+Omarchy install or a fully optional integration this plugin detects on
+its own -- the corresponding button/feature simply doesn't appear if the
+tool it needs isn't installed, with one deliberate exception (see below).
+
+| Tool | Needed for | On a stock Omarchy install? |
+|---|---|---|
+| `openssh` (`ssh`) | Everything -- this is the plugin's core feature | **Not included by default.** Not in Omarchy's own base package list, and nothing else Omarchy installs pulls it in either. Install with `sudo pacman -S openssh`. |
+| `nautilus` | Browse (SFTP) button | Yes -- ships with Omarchy already. |
+| `sshpass` | Non-interactive login for a bookmark with a stored SSH password (optional even among optional features -- SSH still works without it, just prompts interactively) | No -- `sudo pacman -S sshpass` |
+| `freerdp` (provides `xfreerdp3`) | RDP button, and its audio/video | No -- `sudo pacman -S freerdp` |
+
+Get every feature working in one shot (`nautilus` is included too, in
+case you're on a non-stock setup that's missing it):
+
+```bash
+sudo pacman -S --needed openssh sshpass freerdp nautilus
+```
+
+**The `openssh` exception:** every other tool above degrades gracefully
+-- its one feature is simply unavailable, dimmed, or hidden, with
+everything else working normally. `openssh` doesn't get that treatment,
+since it's not "one feature" but the plugin's entire reason to exist --
+instead, a clear red banner appears at the top of the popup if it's
+missing ("openssh not found..."), rather than silently leaving every
+host stuck on "checking" forever with no visible explanation.
 
 ## Installation
 
@@ -104,8 +127,8 @@ them, or use each bookmark's delete button before uninstalling.
 
 - **Click the icon** to open the dashboard. Every host from
   `~/.ssh/config` is listed under "From ~/.ssh/config", with its status
-  dot, resolved `user@hostname:port`, and last-known uptime.
-- **Click Connect** on any host to open a terminal already running
+  dot and resolved `user@hostname:port`.
+- **Click SSH** on any host to open a terminal already running
   `ssh <alias>` into it.
 - Editing `~/.ssh/config` (adding, removing, or renaming a `Host` entry)
   picks up live -- no restart needed.
@@ -154,9 +177,6 @@ them, or use each bookmark's delete button before uninstalling.
 - **Icon** and **Notes** are optional -- the icon (a short emoji) shows
   right next to the host's name; notes stay hidden behind a small 📝
   indicator you click to expand, so the row itself stays compact.
-- **MAC address** (under "▸ Advanced" in the form) enables the Wake button
-  for that host once it's down -- requires `wakeonlan` installed
-  (`sudo pacman -S wakeonlan`); the button simply doesn't appear otherwise.
 
 ### Remote Desktop (RDP)
 
@@ -238,31 +258,32 @@ Click the **⚙** icon in the top-right of the popup for:
 
 ## How it works, briefly
 
-Each host is probed in two stages:
+Each host gets one lightweight, non-interactive TCP probe -- no auth
+attempted, so it works identically regardless of the host's actual login
+method:
 
-1. **An SSH banner grab** against the host's resolved hostname/port
-   (`timeout N bash -c 'exec 3<>/dev/tcp/<host>/<port> && dd bs=64 count=1 <&3'`),
-   checking the response starts with `SSH-`. No authentication attempted --
-   every SSH server sends this identification string immediately on
-   connect, before any login happens (RFC 4253), so this confirms a real
-   sshd is actually listening regardless of how you'd authenticate to it.
-   The round-trip time of this same probe is what the latency column shows.
-   Cheap enough to run every 60 seconds even with the popup closed; this
-   alone drives the status dot and the bar icon's alert state.
-2. **A non-interactive `ssh ... uptime`** (`-o BatchMode=yes`), only
-   attempted once the banner is confirmed and only while the popup is open.
-   `BatchMode=yes` is what keeps this from ever hanging on a password
-   prompt -- a host that needs one just fails fast, leaving uptime at "--".
-   This no longer affects the status dot at all -- a password-only host
-   (no passwordless key from this machine) shows green just like a
-   key-auth one, it simply won't have a live uptime line.
+- **SSH-primary hosts** (the default): a banner grab against the host's
+  resolved hostname/port
+  (`timeout N bash -c 'exec 3<>/dev/tcp/<host>/<port> && dd bs=64 count=1 <&3'`),
+  checking the response starts with `SSH-`. Every SSH server sends this
+  identification string immediately on connect, before any login happens
+  (RFC 4253), so this confirms a real sshd is actually listening --
+  a plain TCP connect alone can't tell that apart from anything else
+  answering on the port.
+- **RDP-primary bookmarks**: a plain TCP connect to the RDP port instead
+  (RDP's binary handshake has no readable banner to check the way SSH's
+  does), since a Windows RDP-only box may not run SSH at all.
+
+The round-trip time of this probe is what the latency column shows.
+Cheap enough to run every 60 seconds even with the popup closed; this
+alone drives the status dot and the bar icon's alert state.
 
 The "currently connected" indicator works differently -- while the popup
 is open, one `pgrep` call per tick lists every running `ssh` process, and
 each host's alias is matched against it as an exact word, not a substring
 (so a host named `db` can never light up just because `db-replica` is
 connected) -- this is also why it catches a session you started by hand in
-a plain terminal, not only one launched via this widget's own Connect
+a plain terminal, not only one launched via this widget's own SSH
 button.
 
 Both `ssh` and the banner probe are trusted system binaries invoked
@@ -281,9 +302,7 @@ plugin's own `git.lab.t-share.cc` example entry, a Forgejo instance's
 embedded git-only server, is a real one) will authenticate fine but then
 refuse the SFTP request itself; GNOME Files shows this as its own "don't
 have permission to access the requested location" error. Nothing this
-plugin can do about that -- it's the remote server's own restriction, the
-same way that host also can't run `uptime` for this plugin's own live
-uptime feature.
+plugin can do about that -- it's the remote server's own restriction.
 
 ## License
 

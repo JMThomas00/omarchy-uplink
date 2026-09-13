@@ -56,7 +56,7 @@ Item {
   readonly property string backupsDir: root.configDir + "/backups"
   readonly property int _maxBackups: 15
 
-  property var bookmarks: [] // [{id, label, hostname, port, user, mac, group, notes, icon}]
+  property var bookmarks: [] // [{id, label, hostname, port, user, group, notes, icon}]
   property bool bookmarksLoaded: false
 
   property string _sshConfigText: ""
@@ -79,7 +79,7 @@ Item {
 
   // Normalizes every loaded bookmark through one defaulting pass rather
   // than relying on scattered `|| ""` at every downstream read site -- an
-  // entry saved before mac/group/notes/icon existed loads with those keys
+  // entry saved before group/notes/icon existed loads with those keys
   // simply absent (undefined, not ""), which would otherwise crash a bare
   // `.trim()`/`.length` call or land an old bookmark in a group literally
   // named "undefined" instead of falling into the ungrouped section.
@@ -90,7 +90,6 @@ Item {
       hostname: b.hostname,
       port: b.port,
       user: b.user || "",
-      mac: b.mac || "",
       group: b.group || "",
       notes: b.notes || "",
       icon: b.icon || "",
@@ -99,14 +98,17 @@ Item {
       // Independent of `port` (the SSH port, written into ~/.ssh/config) --
       // deliberately, see BookmarkForm's own comment on why one shared port
       // field can't represent both SSH and RDP on the same host. JSON-only,
-      // like mac/group/notes/icon.
+      // like group/notes/icon.
       rdpPort: b.rdpPort || "3389",
       // Independent of `user` for the same reason, plus a real, distinct
-      // constraint: `user` is validated against _userRe (POSIX-username-
-      // shaped, no spaces) since it's written into ~/.ssh/config, but a
-      // real Windows account name can be "Jordan Thomas" -- reusing `user`
-      // for RDP would either reject that outright or, worse, let a
-      // space-containing value slip into the SSH config write path.
+      // constraint: `user` is validated against _userRe (no spaces --
+      // `@` IS allowed, for a UPN-style OpenSSH-for-Windows login like
+      // "j.m.thomas@comcast.net") since it's written into ~/.ssh/config,
+      // but a real Windows DISPLAY name can still be "Jordan Thomas" (a
+      // space, which would always break the ssh_config `User` line's
+      // single-token format) -- reusing `user` for RDP would either
+      // reject that outright or, worse, let a space-containing value slip
+      // into the SSH config write path.
       rdpUser: b.rdpUser || "",
       // Plaintext, by explicit user request (2026-09-12) -- this file gets
       // chmod 600 the same as ~/.ssh/config already does (see
@@ -341,14 +343,24 @@ Item {
 
   readonly property var _labelRe: /^[A-Za-z0-9._-]+$/
   readonly property var _hostRe: /^[A-Za-z0-9.:_-]+$/
-  readonly property var _userRe: /^[A-Za-z0-9._-]+$/
-  // mac/group/notes/icon are JSON-only -- never written into ~/.ssh/config
+  // Includes "@" (unlike _labelRe/_hostRe) -- a real Windows OpenSSH-for-
+  // Windows account can legitimately be a UPN-style Microsoft-account
+  // login (e.g. "j.m.thomas@comcast.net"), confirmed live: RedOak genuinely
+  // runs "SSH-2.0-OpenSSH_for_Windows_9.5" (not just RDP), but its SSH
+  // `User` field had no way to ever hold that login -- the field silently
+  // stayed blank, and Browse (SFTP) then authenticated as this machine's
+  // own local Linux username instead of prompting for the right one. `@`
+  // is completely inert in ssh_config's `User` directive (a single
+  // whitespace-delimited token, never shell-interpreted), so allowing it
+  // adds no injection surface -- still no spaces/newlines, which would
+  // actually break the directive's own single-line format.
+  readonly property var _userRe: /^[A-Za-z0-9._@-]+$/
+  // group/notes/icon are JSON-only -- never written into ~/.ssh/config
   // (see SshConfigBlockWriter.renderBlock, which only ever reads
   // id/label/hostname/port/user) -- so they don't need the strict
   // injection-safety allow-list above. Still validated for basic data
   // hygiene: no embedded newlines (breaks single-line Text rendering) and
   // a length cap against UI breakage.
-  readonly property var _macRe: /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/
   readonly property var _noNewlineRe: /[\r\n]/
 
   // Returns an error string to show inline in the form, or "" if fields
@@ -359,7 +371,6 @@ Item {
     var hostname = String((fields && fields.hostname) || "").trim()
     var user = String((fields && fields.user) || "").trim()
     var port = fields ? fields.port : undefined
-    var mac = String((fields && fields.mac) || "").trim()
     var group = String((fields && fields.group) || "").trim()
     var notes = String((fields && fields.notes) || "").trim()
     var icon = String((fields && fields.icon) || "").trim()
@@ -368,7 +379,7 @@ Item {
     if (!root._labelRe.test(label)) return "Label may only contain letters, digits, '.', '_', '-' (no spaces or wildcards)."
     if (!hostname) return "Host/IP is required."
     if (!root._hostRe.test(hostname)) return "Host/IP may only contain letters, digits, '.', ':', '_', '-'."
-    if (user && !root._userRe.test(user)) return "User may only contain letters, digits, '.', '_', '-'."
+    if (user && !root._userRe.test(user)) return "User may only contain letters, digits, '.', '_', '@', '-'."
     if (port !== undefined && port !== null && port !== "") {
       var portNum = Number(port)
       if (!isFinite(portNum) || portNum < 1 || portNum > 65535) return "Port must be between 1 and 65535."
@@ -393,7 +404,6 @@ Item {
     if (password && (root._noNewlineRe.test(password) || password.length > 200)) return "Password must be a single line, under 200 characters."
     var rdpPassword = String((fields && fields.rdpPassword) || "")
     if (rdpPassword && (root._noNewlineRe.test(rdpPassword) || rdpPassword.length > 200)) return "RDP Password must be a single line, under 200 characters."
-    if (mac && !root._macRe.test(mac)) return "MAC address must look like aa:bb:cc:dd:ee:ff."
     if (group && (root._noNewlineRe.test(group) || group.length > 200)) return "Group must be a single line, under 200 characters."
     if (notes && (root._noNewlineRe.test(notes) || notes.length > 200)) return "Notes must be a single line, under 200 characters."
     if (icon && icon.length > 4) return "Icon should be a single short emoji."
@@ -429,7 +439,6 @@ Item {
       hostname: String(fields.hostname).trim(),
       port: String(fields.port || 22),
       user: String(fields.user || "").trim(),
-      mac: String(fields.mac || "").trim(),
       group: String(fields.group || "").trim(),
       notes: String(fields.notes || "").trim(),
       icon: String(fields.icon || "").trim(),
@@ -505,7 +514,7 @@ Item {
     return ""
   }
 
-  // Favorite is JSON-only, like mac/group/notes/icon -- never written into
+  // Favorite is JSON-only, like group/notes/icon -- never written into
   // ~/.ssh/config, so this deliberately doesn't touch _writeBookmarkBlock
   // at all (unlike updateBookmark, which always re-renders the block).
   function setFavorite(id, value) {

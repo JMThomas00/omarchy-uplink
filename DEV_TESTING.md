@@ -768,3 +768,290 @@ unavailable in this environment) -- confirmed via screenshot that
 collapsing hides Sequoia's row while keeping "+ Add" visible and shows
 `▸ Bookmarks (1)`, and that toggling back shows `▾ Bookmarks (1)` with
 the row restored. Hook reverted afterward.
+
+**`openssh` availability check + warning banner added (2026-09-12)** --
+prompted by a direct question about this plugin's real dependency
+footprint on a fresh Omarchy install. Investigated by reading
+`/usr/share/omarchy/install/omarchy-base.packages` and
+`omarchy-other.packages` directly (the actual manifests Omarchy's own
+installer pacstraps from) rather than assuming from what's installed on
+this already-customized dev machine -- found `nautilus` IS in the base
+list (Browse works out of the box, contrary to an earlier assumption),
+`iputils`/`procps-ng`/`which`/coreutils are all guaranteed via the
+`base`/`base-devel` meta-packages Omarchy always installs (confirmed via
+`pacman -Si base`'s own Depends On list, plus `-Si which`'s "Required
+By: base-devel"), but **`openssh` is in neither list, and isn't a
+dependency of anything else Omarchy installs either** (checked via
+`pacman -Si openssh`'s own "Required By" list -- git doesn't depend on
+it, nor does anything else in the base set). This is a real, previously
+unaddressed gap: every OTHER optional tool in this file
+(wakeonlan/nautilus/sshpass/xfreerdp3) already has a `which`-based
+availability check gating its one feature, but `ssh` itself never did,
+despite being the plugin's entire core function.
+- Fixed with the exact same pattern as the other three (`opensshAvailable`
+  bool, `opensshCheckProc`, `_checkOpenssh()`, wired into
+  `Component.onCompleted` and `onOpenedChanged`) -- but surfaced
+  differently in `HostList.qml`: not a dimmed button (there's no single
+  button to dim -- missing `ssh` means `_resolveAlias`'s `ssh -G` never
+  even starts, so `host.hostname` never populates, so `_runTcpProbe`'s
+  own `if (!host.hostname) return` guard silently skips every single
+  host, forever, with zero indication anywhere why). Instead, a
+  Color.urgent-bordered banner Rectangle at the very top of the popup
+  (above Settings, above Bookmarks) -- unmissable, and explains exactly
+  what's wrong and the fix (`sudo pacman -S openssh`) rather than leaving
+  a wall of permanently-grey "checking" dots to puzzle over.
+- Verified live: confirmed the normal case (ssh actually installed) shows
+  no banner via screenshot; then, since ssh genuinely can't be
+  uninstalled from this dev machine without breaking everything else,
+  used a temporary `debugForceSshMissing()` IPC hook to set
+  `opensshAvailable = false` directly (timed carefully -- called only
+  AFTER the popup's own real `_checkOpenssh()` call from `onOpenedChanged`
+  had already completed and set it back to `true`, since nothing else
+  re-triggers that check while the popup stays open) and confirmed via a
+  second screenshot that the banner renders correctly, full text visible,
+  correctly styled. Hook reverted afterward.
+- Documented comprehensively in a new README.md "Requirements" section
+  (a table of every tool this plugin ever shells out to, whether it's in
+  Omarchy's base install, and the exact install command for whichever
+  aren't) -- this belongs in the user-facing doc, not just here, since
+  it's the kind of thing someone evaluating or troubleshooting the
+  plugin would actually go looking for.
+
+**SECURITY FIX: command injection in `_runTcpProbe`'s bash -c strings
+(2026-09-12)**, found during a pre-marketplace-submission audit modeled
+directly on the review findings that stalled `omarchy-linecast`'s own
+submission (see that plugin's marketplace memory/notes -- subprocess
+safety was one of its actual blocking rounds). Both the SSH-banner and
+RDP branches built their `bash -c` script via plain string concatenation
+(`"exec 3<>/dev/tcp/" + host.hostname + "/" + host.port + " && ..."`).
+`host.hostname`/`host.port` for a BOOKMARK are charset-restricted
+(`BookmarkStore._hostRe`), so not exploitable through the plugin's own
+UI -- but a PLAIN (non-bookmark) `~/.ssh/config` host's hostname/port come
+straight from `ssh -G`'s raw resolved output via `parseResolvedConfig`'s
+regex, which only excludes whitespace, not shell metacharacters. A
+realistic path to an attacker-controlled `HostName`/`Port` value existing
+in a real user's `~/.ssh/config` is a compromised or malicious dotfiles
+sync, not just a self-inflicted hand-edit -- exactly the kind of
+"trusted input turns out not to always be trusted" finding a marketplace
+security reviewer would flag on principle, string-concat-into-a-shell
+regardless of current reachability.
+- Fixed by passing `host.hostname`/port as bash POSITIONAL PARAMETERS
+  (`bash -c 'script using "$1"/"$2"' _ hostval portval`) instead of
+  splicing them into the script string -- bash performs ordinary
+  parameter expansion on `"$1"`/`"$2"`, substituting the literal VALUE
+  without re-parsing it as code, so even a value containing
+  `$(...)`/backticks/`;` lands as inert text.
+- Verified the fix does what it's supposed to, both directions: (1) a
+  normal real hostname/port still connects exactly as before -- opened
+  the popup after the fix and confirmed every real bookmark's status dot
+  still resolves correctly (all green); (2) a deliberately malicious test
+  value (`127.0.0.1; touch .../pwned_marker #`) run through the exact
+  same positional-parameter pattern via a manual `bash -c` reproduction
+  does NOT execute the injected `touch` -- confirmed the marker file was
+  never created, and the attempt instead fails as an invalid `/dev/tcp/`
+  target (the same failure mode a harmless typo would produce), both
+  before writing the real fix and re-confirmed by reasoning through
+  bash's own parameter-expansion semantics (a parameter's substituted
+  value is never re-scanned for further expansion/execution).
+- Broader audit performed at the same time, all clean: grepped for every
+  other `bash -c`/`eval`/`Function(` use in the codebase (none found
+  beyond these two, now-fixed spots); confirmed no `sudo`/`pkexec`/`doas`
+  anywhere in the plugin's own code (the one `sudo` string in the whole
+  codebase is user-facing instructional text in the openssh-missing
+  banner, telling the USER to run it themselves); confirmed every
+  `~/.ssh/config` CONTENT write is tied to an explicit user action
+  (Add/Edit/Delete a bookmark, Rename/Delete a plain host) with a
+  one-time pre-write backup plus rolling per-write backups, never a
+  silent/unprompted overwrite; confirmed the real Windows password shared
+  earlier this session for live debugging never made it into git history
+  at any point (`git log --all -p | grep <password>` came back empty --
+  it only ever lived in `~/.config/uplink/bookmarks.json`, outside the
+  git-tracked plugin directory entirely, exactly as designed).
+
+**SSH `User` field now allows `@` (2026-09-12)** -- reported live: Browse
+(SFTP) on RedOak prompted "Enter password for gh0st on 192.168.1.22"
+instead of asking for the real Windows account. Root cause: `sftpUri`
+builds its `userPart` from the bookmark's SSH `user` field, which was
+blank -- not an oversight in the sftpUri logic itself, but because
+`_userRe` (`^[A-Za-z0-9._-]+$`) had no way to ever ACCEPT
+"j.m.thomas@comcast.net" in the first place, so the field could only ever
+be saved empty for this bookmark. First checked whether this was even
+worth fixing (SFTP is fundamentally SSH-dependent, and RedOak's primary
+protocol is RDP) by re-running this file's own banner-probe technique
+by hand against 192.168.1.22:22 -- confirmed a genuine, real
+`SSH-2.0-OpenSSH_for_Windows_9.5` server, not just RDP, so a correct SSH
+`User` value really would make Browse work, not just relocate the same
+dead end. Fixed by adding `@` to `_userRe` (now
+`^[A-Za-z0-9._@-]+$`) -- still excludes spaces/newlines (would break
+`~/.ssh/config`'s single-token `User` line), but a UPN-style Microsoft-
+account login is otherwise completely inert in that context, no
+injection surface added. This is the same accommodation `rdpUser` was
+already given for the exact same underlying reason (a real Windows
+account isn't shaped like a POSIX username) -- it just hadn't been
+extended to the SSH `user` field itself until this real bookmark
+happened to need both fields correctly populated at once.
+- Verified live end-to-end via a temporary `debugSetSshUser(alias, user)`
+  hook calling the real `bookmarkStore.updateBookmark` (passing every
+  existing field explicitly, not just `user`, so `rdpPassword` etc. don't
+  get silently defaulted away by `_fieldsToBookmark`'s own missing-field
+  defaults): confirmed `""` (success) returned, confirmed both
+  `bookmarks.json` and the live `~/.ssh/config` `Host RedOak` block's
+  `User` line updated to `j.m.thomas@comcast.net`, and confirmed by hand
+  that the resulting `sftpUri` correctly URL-encodes to
+  `sftp://j.m.thomas%40comcast.net@192.168.1.22/` (the `@` inside the
+  username percent-encoded so it can't be confused with the URI's own
+  user@host delimiter). Actually opening Browse and confirming the
+  credential prompt now asks for the right account needs the user's own
+  follow-up click. Hook reverted afterward.
+
+**Port fields showed a thousands-separator comma (2026-09-12)** --
+reported live: RDP Port defaulted to "3,389" in the edit form. Root
+cause is Qt Quick Controls' own `SpinBox` default `textFromValue`
+(`Number(value).toLocaleString(locale, 'f', 0)`), which locale-formats
+with grouping separators for any value >= 1000 -- SSH Port's own default
+(22) never showed it only because it's under 1000, not because it was
+actually unaffected; a custom SSH port >= 1000 would have shown the
+identical bug. The shared `NumberField` component (`qs.Ui`) that both
+Port fields use doesn't override this, and it isn't this plugin's own
+file to edit -- it lives in `/usr/share/omarchy/shell/Ui/NumberField.qml`,
+outside this repo entirely. Fixed from within `BookmarkForm.qml` instead:
+`NumberField` exposes its underlying `SpinBox` via a `field` alias
+(already used for `field.Keys.onReturnPressed`), and `textFromValue`/
+`valueFromText` are ordinary function-valued properties on that SpinBox,
+overridable via the same grouped-property syntax
+(`field.textFromValue: function(value, locale) { ... }`) without
+touching the shared component's file at all. New implementation just
+does plain `String(value)` (no locale formatting at all -- a port number
+is never a "quantity" that benefits from digit grouping) and a
+comma-stripping `parseInt` for the reverse direction, applied to both
+`portField` and `rdpPortField` identically. Verified: `omarchy plugin
+validate` clean; the exact function bodies confirmed via `node -e`
+outside the plugin (`textFromValue(3389)` -> `"3389"`,
+`valueFromText("3,389")` -> `3389`, still handles a value someone pastes
+in with a stray comma); the SSH Port field's own screenshot showed a
+clean "22" post-fix (already true before too, since it's under 1000 --
+included for completeness, not proof on its own). The RDP Port field's
+own rendered text wasn't independently reconfirmed via screenshot after
+attaching the same override (the popup's scroll position made it awkward
+to frame in this pass, and it's the identical function object on an
+identical component instance) -- if it still shows a comma in practice,
+that would mean the grouped-property override itself isn't taking
+effect, not that the fix logic is wrong, and should be reported back.
+**Confirmed fixed** by the user directly (no comma on either field).
+
+**"Connect" button relabeled to "SSH" (2026-09-12)** -- purely a label
+change (`HostRow.qml`'s button `Text`, plus every README mention that
+names the button specifically), requested for clarity now that the row
+has three protocol-specific action buttons (Ping/SSH/RDP) instead of one
+generic "Connect" -- disambiguates which protocol each button actually
+uses at a glance. No signal/function/id renamed (`connectRequested`,
+`connectToHost`, `connectButton`/`connectArea` all untouched) -- this is
+UI text only, not a behavior or API change, so renaming the internal
+plumbing to match would have been unnecessary churn. README's own
+"Connect via" wording (the SSH/RDP protocol selector in the add/edit
+form) is a DIFFERENT UI element and was deliberately left alone -- only
+updated the mentions that name the row's own action button. Verified
+live via screenshot: button reads "SSH", correctly positioned between
+Ping and RDP.
+
+**Wake-on-LAN removed entirely (2026-09-12)**, `mac` bookmark field
+included -- while setting up to test it, found `wakeonlan` wasn't even
+installed on this machine and no bookmark had a MAC address set, so a
+real test needed installing yet another optional dependency just to
+exercise a feature nobody had actually used yet. Decided to drop it
+rather than chase that setup, keeping the plugin's dependency footprint
+smaller. Removed completely, not just hidden, matching this plugin's own
+established practice (see the earlier uptime-probe removal entry above)
+of not leaving dead code/fields behind once a feature's gone:
+- `BarWidget.qml`: the whole "Wake-on-LAN" section
+  (`wakeonlanAvailable`, `wakeonlanCheckProc`, `_checkWakeonlan()`,
+  `wakeProcComponent`, `wakeHost(mac)`), its `Component.onCompleted`/
+  `onOpenedChanged` wiring, and the `HostList` property/signal wiring.
+- `HostList.qml`: `wakeonlanAvailable` property, `wakeRequested` signal,
+  `mac` out of `_displayHostForBookmark`'s merge, the delegate wiring,
+  and `initialMac` off the `BookmarkForm` instantiation.
+- `HostRow.qml`: `wakeonlanAvailable` property, `wakeRequested` signal,
+  `showWake`, and the entire `wakeButton` Rectangle -- buttonRow now
+  ends at RDP.
+- `BookmarkStore.qml`: `mac` out of the bookmark shape entirely
+  (`_normalizeBookmark`, `_fieldsToBookmark`, `validateFields`), plus the
+  now-unused `_macRe` regex.
+- `BookmarkForm.qml`: `initialMac` prop, the `macField` TextField (was
+  the first item under "▸ Advanced", which now holds only Notes),
+  `_loadFields`/`_submit`'s own references to it, and the
+  `advancedOpen` auto-expand check (now keyed on notes alone).
+- `README.md`: the Wake-on-LAN feature bullet, its `wakeonlan`
+  Requirements-table row, its mention in the one-shot install command,
+  and the MAC-address bookmark-field bullet.
+- Existing bookmarks with a leftover `mac: ""` key in `bookmarks.json`
+  (all of them, in practice, since it was always empty) are left as-is
+  rather than proactively rewritten -- harmless dead data that
+  self-corrects the next time each bookmark is normally saved again
+  (`_fieldsToBookmark` no longer emits the key at all).
+- Verified live: `omarchy plugin validate` clean, no warnings on reload,
+  a full `grep -rn -i "wakeonlan|wakeRequested|wakeHost|showWake|\bmac\b"`
+  across every `.qml`/`.js` file came back with only two stale prose
+  comment mentions (fixed in the same pass, not functional code), popup
+  screenshot confirmed no dead gap where the Wake button used to sit
+  (buttonRow simply ends one item shorter now), and the edit form opened
+  cleanly with no `macField`-related errors. Version bumped to 3.0.0 --
+  a removed user-facing feature/field warrants a major bump, unlike the
+  incremental additions/fixes this session had been using 2.x.x for.
+
+**Cleanup/bug/perf pass (2026-09-12)** -- a full fresh re-read of every
+`.qml` file (the `.js` files hadn't changed since their own earlier
+review this session, so skipped), specifically looking for leftover
+references from all the churn today (Ping, RDP protocol-awareness, the
+openssh check, the SSH `@` allowance, Connect->SSH, Wake-on-LAN removal)
+and any real bugs/perf issues, not just a repeat of the earlier
+bug-squashing/optimization passes already documented above.
+- **Applied (real, measurable waste, now fixed):** `pingHost`/
+  `_applyPingResult` both called `_patchHost` to set `pingStatus`, and
+  `_patchHost` unconditionally scheduled a debounced `status-cache.json`
+  write on every call -- for a field `_saveCache`'s own object literal
+  never includes at all. A single Ping click (which always passes through
+  "pending" before landing on a real result -- two separate patches)
+  could cause two real, pointless disk writes, since a ping's round trip
+  is often slower than the 500ms save-debounce window, so the two patches
+  don't collapse into one write. Fixed by adding a `skipSave` third
+  argument to `_patchHost`, passed `true` from both ping call sites.
+  Verified live: recorded `status-cache.json`'s mtime, triggered a real
+  ping via a temporary `debugPing(alias)` hook, confirmed the mtime was
+  IDENTICAL afterward (first attempt caught residual restart-probe
+  activity as a false positive -- redid it after letting the shell fully
+  settle first, which is the correct control).
+- **Applied (stale/inaccurate comments, not functional bugs):**
+  - `HostRow.qml` had two leftover comments still naming "Wake" among a
+    list of buttons/write-actions after its removal.
+  - `BarWidget.qml`'s top-of-file `hosts` shape comment was still
+    describing the removed two-stage Stage-A/uptime probe design AND
+    claiming `up` always means "a real SSH banner was seen" -- both wrong
+    since the RDP-protocol-aware probe change; also never listed
+    `source`/`configMissing`/`connected`/`pingStatus` at all. Rewritten to
+    describe the actual current single-probe, protocol-aware design and
+    the full field list.
+  - `README.md` had SUBSTANTIAL uptime-feature documentation left over
+    from before that feature was removed several turns ago in this same
+    session -- a whole Features bullet, a whole numbered step in "How it
+    works" describing the non-interactive `ssh ... uptime` probe that no
+    longer exists, and three smaller inline mentions. This had been
+    noticed and deliberately deferred earlier (out of scope for the turn
+    that removed the feature) -- this cleanup-focused round was the
+    right moment to finally fix it. Rewrote "How it works" to describe
+    the actual current probe (one stage, protocol-aware: SSH banner vs.
+    RDP plain-TCP) instead of the removed two-stage design.
+- **Checked, found clean (no changes needed):** `HostList.qml`,
+  `BookmarkForm.qml`, `BookmarkStore.qml`, `SettingsStore.qml`,
+  `SettingsPanel.qml`, `ExportImportPanel.qml`,
+  `ConfigHostRenameForm.qml` -- re-read in full, no dead code, no stale
+  comments, no logic bugs found. Specifically checked and confirmed
+  correct: a `configMissing` bookmark row still gets `protocol`/
+  `rdpPort`/`rdpUser`/`rdpPassword`/`favorite` correctly via
+  `HostList._displayHostForBookmark`'s merge (which always overlays the
+  bookmark's own JSON fields regardless of the underlying `hosts` entry's
+  own state), so Ping/RDP/favorite all stay fully functional on a
+  configMissing row, matching the existing SSH-only gating
+  (`connectApplicable`) -- not a new finding, just re-verified after the
+  RDP-protocol-probe and Ping additions to make sure neither had
+  silently broken that invariant.
+- Version bumped to 3.0.1 (cleanup/perf, no user-facing feature change).

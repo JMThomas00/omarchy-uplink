@@ -14,38 +14,38 @@ import qs.Commons
 // already flagged the original one-line anchor chain as being at its
 // practical limit before this row grew this much further.
 //
-// Every row-1 button/star slot (Wake, favorite, RDP) is ALWAYS rendered at
+// Every row-1 button/star slot (favorite, RDP) is ALWAYS rendered at
 // a fixed size now, dimmed+disabled rather than hidden when inapplicable
 // to that particular row (see remoteDesktopApplicable's own comment on
 // why) -- reported live: hiding them instead shifted every OTHER button
-// sideways depending on that row's own data, so "Connect" landed in a
-// different horizontal position on almost every row. The exception is a
-// missing SYSTEM dependency (remoteDesktopAvailable/wakeonlanAvailable/
-// fileManagerAvailable) -- those still hide their button/row entirely,
-// uniformly across every row, which never causes misalignment since it's
-// the same for all of them.
+// sideways depending on that row's own data, so "SSH" (labeled "Connect"
+// at the time) landed in a different horizontal position on almost every
+// row. The exception is a
+// missing SYSTEM dependency (remoteDesktopAvailable/fileManagerAvailable)
+// -- those still hide their button/row entirely, uniformly across every
+// row, which never causes misalignment since it's the same for all of
+// them.
 //
 // `editable` rows (bookmarks and plain ~/.ssh/config hosts alike) show
-// Edit/Delete; only a real bookmark (bookmarkId !== "") has a MAC/
-// favorite/protocol to make Wake/star/RDP meaningfully applicable, but
+// Edit/Delete; only a real bookmark (bookmarkId !== "") has a
+// favorite/protocol to make star/RDP meaningfully applicable, but
 // the slots themselves still render (dimmed) on a config-host row too, to
 // keep every row's layout identical.
 Column {
   id: root
 
   // { alias, hostname, port, user, status, lastCheckedAt,
-  //   latencyMs, connected, mac, group, notes, icon, pingStatus }
+  //   latencyMs, connected, group, notes, icon, pingStatus }
   // (pingStatus: undefined until the user clicks Ping at least once this
   // session, then "pending" while in flight, then a result string --
   // never persisted to status-cache.json, see BarWidget._saveCache.)
-  // (mac/group/notes/icon only ever present on a bookmark-sourced host --
+  // (group/notes/icon only ever present on a bookmark-sourced host --
   // see HostList._displayHostForBookmark, which merges the bookmark's own
   // fields onto the live/synthesized probe object.)
   property var host: null
   property color dotColor: Color.muted
   property bool editable: false
   property bool compact: false
-  property bool wakeonlanAvailable: true
   property bool fileManagerAvailable: true
   property bool remoteDesktopAvailable: true
   // Only meaningful when editable -- the bookmark's own stable id (distinct
@@ -92,7 +92,6 @@ Column {
   signal pingRequested(string alias)
   signal editRequested(string bookmarkId)
   signal deleteRequested(string bookmarkId)
-  signal wakeRequested(string mac)
   signal browseRequested(string uri)
   signal favoriteRequested(string bookmarkId)
   signal remoteDesktopRequested(string protocol, string hostname, string port, string user, string password)
@@ -121,17 +120,15 @@ Column {
     var ms = root.host.latencyMs
     return (ms === null || ms === undefined) ? "—" : Math.round(ms) + "ms"
   }
-  readonly property bool showWake: root.editable && root.host && !!root.host.mac && root.wakeonlanAvailable && root.host.status === "down"
-
   // A configMissing row's `alias` no longer has a matching Host block in
   // ~/.ssh/config (hand-deleted out from under the plugin) -- `ssh <alias>`
   // would then have nothing to resolve it against and fail (or, worse,
   // silently try to connect to a DIFFERENT real host that happens to share
   // that literal name), even though the bookmark's own known-good
-  // hostname/port/user are sitting right there, unused. Browse/Wake/RDP
-  // are unaffected (they're built from those same host.hostname/mac/
-  // rdpPort/rdpUser fields directly, never from the alias), so only
-  // Connect needs gating here -- the fix (Edit -> Save) re-renders the
+  // hostname/port/user are sitting right there, unused. Browse/RDP are
+  // unaffected (they're built from those same host.hostname/rdpPort/
+  // rdpUser fields directly, never from the alias), so only SSH
+  // needs gating here -- the fix (Edit -> Save) re-renders the
   // block from those same fields, which is exactly why the subtitle
   // message already says "edit to restore" rather than "reconnecting."
   readonly property bool connectApplicable: !(root.host && root.host.configMissing)
@@ -182,9 +179,9 @@ Column {
     onTriggered: root._pingResultVisible = false
   }
 
-  // Deliberately NOT gated by `editable` -- unlike Wake/Edit/Delete (all
-  // bookmark-only write actions), browsing is read-only and equally
-  // useful on a plain ~/.ssh/config row.
+  // Deliberately NOT gated by `editable` -- unlike Edit/Delete (write
+  // actions), browsing is read-only and equally useful on a plain
+  // ~/.ssh/config row.
   readonly property string sftpUri: {
     if (!root.host || !root.host.hostname) return ""
     var userPart = root.host.user ? encodeURIComponent(root.host.user) + "@" : ""
@@ -205,14 +202,14 @@ Column {
   // Split into two properties, deliberately -- `remoteDesktopAvailable`
   // (is xfreerdp3 even installed) gates whether the button SLOT renders
   // at all, matching the established graceful-degradation convention for
-  // a missing system dependency (same as Wake-on-LAN/Browse): every row
-  // hides it together, uniformly, so this alone never causes misalignment
-  // between rows. `remoteDesktopApplicable` (does THIS row have a
-  // non-ssh protocol configured) instead just dims an always-present
-  // button -- reported live: hiding per-row-inapplicable buttons entirely
-  // (the original design) shifted every OTHER button in the row sideways
-  // depending on which host had a MAC/RDP set, so "Connect" landed in a
-  // different horizontal position on almost every row. A fixed-size slot
+  // a missing system dependency (same as Browse): every row hides it
+  // together, uniformly, so this alone never causes misalignment between
+  // rows. `remoteDesktopApplicable` (does THIS row have a non-ssh
+  // protocol configured) instead just dims an always-present button --
+  // reported live: hiding per-row-inapplicable buttons entirely (the
+  // original design) shifted every OTHER button in the row sideways
+  // depending on which host had RDP set, so "SSH" landed in a different
+  // horizontal position on almost every row. A fixed-size slot
   // that's merely disabled+dimmed when inapplicable keeps every row's
   // buttons in identical positions regardless of that row's own data.
   readonly property bool remoteDesktopApplicable: root.editable && root.host && !!root.host.protocol && root.host.protocol !== "ssh"
@@ -393,7 +390,7 @@ Column {
 
         Text {
           anchors.centerIn: parent
-          text: "Connect"
+          text: "SSH"
           color: connectArea.containsMouse ? Color.background : Color.foreground
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
@@ -446,43 +443,6 @@ Column {
           // on the same host -- a real Windows account name like "Jordan
           // Thomas" also isn't valid in the SSH `user` field's charset).
           onClicked: if (root.host) root.remoteDesktopRequested(root.host.protocol, root.host.hostname, root.host.rdpPort, root.host.rdpUser, root.host.rdpPassword)
-        }
-      }
-
-      // Wake lives last, deliberately separated from Edit/Delete/Browse/
-      // Connect/RDP -- it's the button used least often (only relevant for
-      // a down, MAC-equipped host), so it sits at the far edge rather than
-      // crowding the frequently-used cluster. Always rendered at a fixed
-      // size, dimmed+disabled (not hidden) when this row has no MAC/isn't
-      // down -- see remoteDesktopApplicable's own comment above on why: a
-      // hidden-vs-shown button shifts every OTHER button in the row
-      // sideways depending on that row's own data, which is exactly the
-      // misalignment this fixes.
-      Rectangle {
-        id: wakeButton
-        width: Style.space(52)
-        height: Style.space(22)
-        radius: Style.cornerRadius
-        opacity: root.showWake ? 1.0 : 0.35
-        color: (root.showWake && wakeArea.containsMouse) ? Style.hoverFill : "transparent"
-        border.width: Style.normalBorderWidth
-        border.color: Style.normalBorderColor
-
-        Text {
-          anchors.centerIn: parent
-          text: "Wake"
-          color: Color.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-        }
-
-        MouseArea {
-          id: wakeArea
-          anchors.fill: parent
-          enabled: root.showWake
-          hoverEnabled: root.showWake
-          cursorShape: root.showWake ? Qt.PointingHandCursor : Qt.ArrowCursor
-          onClicked: root.wakeRequested(root.host.mac)
         }
       }
     }

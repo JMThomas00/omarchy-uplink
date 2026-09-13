@@ -49,13 +49,12 @@ Column {
   property var settingsStoreRef: null
   property var statusColorFor: null   // function(status) -> color
   property bool sawInclude: false
-  property bool wakeonlanAvailable: true
+  property bool opensshAvailable: true
   property bool fileManagerAvailable: true
   property bool remoteDesktopAvailable: true
 
   signal connectRequested(string alias)
   signal pingRequested(string alias)
-  signal wakeRequested(string mac)
   signal browseRequested(string uri)
   signal remoteDesktopRequested(string protocol, string hostname, string port, string user, string password)
 
@@ -76,7 +75,7 @@ Column {
     return null
   }
 
-  // Merges a bookmark's own entered fields (including mac/group/notes/icon,
+  // Merges a bookmark's own entered fields (including group/notes/icon,
   // which never live on a probed `hosts` entry -- those come purely from
   // ssh probing, not from bookmarks.json) with its live probe result (if
   // any has arrived yet) into the shape HostRow expects.
@@ -90,7 +89,6 @@ Column {
       status: "checking"
     }
     return Object.assign({}, base, {
-      mac: bookmark.mac,
       group: bookmark.group,
       notes: bookmark.notes,
       icon: bookmark.icon,
@@ -289,6 +287,32 @@ Column {
     }
   }
 
+  // Unmissable, not dimmed/hidden like every other optional-dependency
+  // gate in this plugin -- see BarWidget's own opensshAvailable comment
+  // for why this one gets a banner instead of scattered dimmed buttons:
+  // without ssh, every single row is permanently stuck on "checking"
+  // with no other visible explanation anywhere in the UI.
+  Rectangle {
+    visible: !root.opensshAvailable
+    width: parent.width
+    height: sshWarningText.implicitHeight + Style.spacing.md * 2
+    radius: Style.cornerRadius
+    color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.12)
+    border.width: Style.normalBorderWidth
+    border.color: Color.urgent
+
+    Text {
+      id: sshWarningText
+      anchors.fill: parent
+      anchors.margins: Style.spacing.md
+      text: "⚠ openssh not found -- every host below will stay stuck on \"checking\" until it's installed. Run \"sudo pacman -S openssh\", then reopen this popup."
+      color: Color.urgent
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
+    }
+  }
+
   SettingsPanel {
     visible: root.settingsOpen
     width: root.width
@@ -398,7 +422,6 @@ Column {
             width: root.width
             editable: true
             compact: root.settingsStoreRef ? root.settingsStoreRef.compactRows : false
-            wakeonlanAvailable: root.wakeonlanAvailable
             fileManagerAvailable: root.fileManagerAvailable
             remoteDesktopAvailable: root.remoteDesktopAvailable
             bookmarkId: modelData.id
@@ -415,7 +438,6 @@ Column {
             onPingRequested: function(alias) { root.pingRequested(alias) }
             onEditRequested: function(bookmarkId) { root.openEditForm(bookmarkId) }
             onDeleteRequested: function(bookmarkId) { if (root.bookmarkStoreRef) root.bookmarkStoreRef.deleteBookmark(bookmarkId) }
-            onWakeRequested: function(mac) { root.wakeRequested(mac) }
             onBrowseRequested: function(uri) { root.browseRequested(uri) }
             onFavoriteRequested: function(bookmarkId) { if (root.bookmarkStoreRef) root.bookmarkStoreRef.setFavorite(bookmarkId, !modelData.favorite) }
             onRemoteDesktopRequested: function(protocol, hostname, port, user, password) { root.remoteDesktopRequested(protocol, hostname, port, user, password) }
@@ -446,7 +468,6 @@ Column {
       initialHostname: root._editingBookmark ? root._editingBookmark.hostname : ""
       initialPort: root._editingBookmark ? root._editingBookmark.port : "22"
       initialUser: root._editingBookmark ? root._editingBookmark.user : ""
-      initialMac: root._editingBookmark ? root._editingBookmark.mac : ""
       initialGroup: root._editingBookmark ? root._editingBookmark.group : ""
       initialNotes: root._editingBookmark ? root._editingBookmark.notes : ""
       initialIcon: root._editingBookmark ? root._editingBookmark.icon : ""
