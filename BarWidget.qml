@@ -1032,8 +1032,20 @@ BarWidget {
     // visibly living in a terminal is the whole point, stored password or
     // not.
     var bookmark = bookmarkStore.bookmarks.filter(function(b) { return b.label === alias })[0]
+    // -o StrictHostKeyChecking=accept-new (TOFU, same philosophy as
+    // launchRemoteDesktop's own /cert:tofu) is REQUIRED here, not just
+    // nice-to-have: sshpass only auto-answers a password prompt, never an
+    // unknown-host-key prompt -- confirmed live that ssh's default
+    // behavior (interactive yes/no) leaves sshpass with nothing to feed
+    // it, so it exits immediately (code 6, "Host public key is unknown")
+    // instead of connecting, on literally the first-ever connection to
+    // any host from this machine. Without this flag every stored-password
+    // bookmark's very first SSH connect fails this way. A real host key
+    // CHANGING later still hard-fails as normal -- accept-new only trusts
+    // a host with no existing known_hosts entry, same as a manual `ssh`
+    // would after answering "yes" once.
     var sshCommand = (bookmark && bookmark.password && root.sshpassAvailable)
-      ? ["sshpass", "-p", bookmark.password, "ssh", alias]
+      ? ["sshpass", "-p", bookmark.password, "ssh", "-o", "StrictHostKeyChecking=accept-new", alias]
       : ["ssh", alias]
     var proc = launchProcComponent.createObject(root, {
       command: ["/usr/share/omarchy/bin/omarchy-launch-terminal"].concat(sshCommand)

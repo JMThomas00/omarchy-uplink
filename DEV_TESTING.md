@@ -1198,3 +1198,56 @@ manually `cp`-ing a backup file from a terminal.
   Confirmed bookmarks.json (7 real bookmarks), the real backups directory
   (still 15 files), and the active theme (Tokyo Night) were all unchanged
   by this test.
+
+**Stored-password SSH failed on a host's first-ever connection (2026-09-15)**
+-- reported live: after finally getting OpenSSH Server running on Sequoia
+(a prerequisite gap, unrelated to this plugin -- see below), clicking SSH
+opened a Ghostty window showing Ghostty's own "Command failed" screen
+instead of a shell.
+- First ruled out the obvious candidates with real, live evidence rather
+  than guessing: `timeout 3 bash -c 'echo > /dev/tcp/<ip>/22'` confirmed
+  port 22 genuinely wasn't reachable at all before OpenSSH Server was
+  installed/started on Sequoia (a Windows-side prerequisite, not a bug
+  here) -- walked the user through enabling it. Once enabled, re-ran the
+  exact same sshpass/ssh command this plugin issues directly in a shell
+  (bypassing Ghostty) and it authenticated fine (exit 0) -- proved the
+  credentials and the sshpass invocation itself were never the problem.
+- Root cause, found by reproducing the exact original first-attempt state
+  rather than testing against my own now-trusted connection: removed the
+  known_hosts entry (`ssh-keygen -R <ip>`) my own diagnostic connection
+  had just added, then re-ran this plugin's bare
+  `sshpass -p <password> ssh <alias>` (no extra flags) against the
+  now-truly-unknown host again -- exit code 6, sshpass's own documented
+  code for "Host public key is unknown. sshpass exits without confirming
+  the new key." sshpass auto-answers a *password* prompt, but by design
+  never auto-answers an unknown-host-key prompt (a deliberate anti-MITM
+  safeguard) -- and since Sequoia had never been SSH'd-to from this
+  machine before this session, there was no existing known_hosts entry,
+  so this fires on literally every stored-password bookmark's first-ever
+  connection to a new host, not just Sequoia. Ghostty shows its own
+  "Command failed" screen for the child process's fast, abnormal exit --
+  not a Ghostty bug, and not specific to Ghostty's `--gtk-single-instance`
+  (chased that as a possible cause first, based on Ghostty's own upstream
+  `.desktop` file unconditionally forcing it via `Exec=... --gtk-single-
+  instance=true`, which does override this user's own `gtk-single-
+  instance = false` config -- confirmed real, but a dead end: it wasn't
+  what actually broke the connection).
+- Fix, in `BarWidget.qml`'s `connectToHost`: the sshpass-driven ssh
+  invocation now always adds `-o StrictHostKeyChecking=accept-new` --
+  same trust-on-first-use philosophy `launchRemoteDesktop` already uses
+  for RDP's `/cert:tofu` (accepts an unseen key on first connect, still
+  hard-fails if a previously-trusted host's key later actually changes,
+  which is the real MITM-relevant case). The no-stored-password path
+  (plain interactive `ssh <alias>` in a real terminal) needed no change
+  -- a live keyboard is right there to answer that prompt normally.
+- Verified live end-to-end, not just by inspection: added a temporary
+  `debugSshConnect(alias)` IPC hook calling `connectToHost()` directly,
+  deliberately re-removed Sequoia's known_hosts entry again to reproduce
+  a genuinely first-ever connection, triggered it via
+  `qs -p /usr/share/omarchy/shell ipc call jmthomas00.uplink
+  debugSshConnect Sequoia`, and confirmed via `pgrep` (a real running
+  `sshpass ... ssh ...` child process, not exiting immediately) and a
+  screenshot (a live, authenticated `C:\Users\JMTho>` prompt) that the
+  exact failure mode was fixed. Closed the test session and removed the
+  debug hook afterward (confirmed via `grep -rn "debug" *.qml` returning
+  empty) and deleted the screenshot.
