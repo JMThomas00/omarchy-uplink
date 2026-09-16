@@ -1310,3 +1310,50 @@ each alternative actually authenticates before wiring it in.
   fast-failure signature, rather than the notification feature firing,
   for RDP). Removed both debug hooks afterward (confirmed via `grep -rn
   "debug" *.qml` returning empty).
+
+**SSH password's OWN temp-file writer still leaked it via argv
+(2026-09-16)** -- second round of the same marketplace finding
+(HANCORE-linux, issue #6759): the previous entry's fix moved the
+password off `sshpass`'s argv, but the small `bash -c '...' _ <password>
+<tmpPath>` helper THAT WRITES the credential file still had it as a
+literal element of ITS OWN command array (`$1`) -- keeping it out of the
+script TEXT stops shell injection, but a bash process's own positional
+parameters are still just as much a part of that process's argv as any
+other value, still readable via `ps`/`/proc/<pid>/cmdline` for as long as
+that helper ran. A real gap, correctly caught -- conflated
+"injection-safe" with "not-in-argv," which are different properties.
+- Fix, in `_connectWithSshpass`: unlike the real `sshpass`/`ssh` process
+  (several generations removed behind `omarchy-launch-terminal`/
+  `xdg-terminal-exec`/the terminal emulator), this writer helper IS a
+  process the plugin owns directly -- so it gets the exact same
+  stdin-pipe treatment already proven for the RDP path. The command
+  array is now just `["bash", "-c", "umask 077; head -n1 > \"$1\"", "_",
+  tmpPath]` (no password anywhere in it), with `stdinEnabled: true`, and
+  the password is fed via `writeProc.write(password + "\n")` right after
+  `running = true`.
+- `head -n1`, not `cat`, is deliberate: this plugin never explicitly
+  closes a `Process`'s stdin (no API for it was found in Quickshell's own
+  `Process` type -- only `write()` and the `stdinEnabled` property), so
+  anything relying on EOF to know it's done reading would hang forever.
+  `head -n1` reads exactly one line and exits the instant it sees the
+  trailing `\n` from `write()`, with no dependency on the pipe ever being
+  closed. Verified this specific property in isolation before touching
+  any code: a Python harness held a subprocess's stdin pipe open
+  (deliberately never closed, matching this plugin's own behavior),
+  wrote one line, and confirmed `head -n1 > file` exited on its own (rc
+  0) with the correct content and `600` permissions -- not just "should
+  work" from the docs.
+- Verified live end-to-end again: restored the temporary
+  `debugSshConnect` IPC hook, removed Sequoia's known_hosts entry once
+  more, and this time polled `pgrep -af` at 50ms intervals starting
+  BEFORE triggering the connection (tighter than the previous entry's
+  polling, specifically to try to catch the now-much-shorter-lived writer
+  helper mid-flight) -- caught zero instances of the writer process at
+  all across the whole poll window, consistent with `head -n1` exiting
+  in low single-digit milliseconds, and confirmed by code inspection
+  (not just non-observation) that its command array genuinely never
+  contains the password. Confirmed the real `sshpass`/`ssh` processes'
+  argv was still clean (`-f <tmpfile>` only), and confirmed real
+  successful authentication via screenshot (a live `C:\Users\JMTho>`
+  prompt). Removed the debug hook afterward (confirmed via `grep -rn
+  "debug" *.qml` returning empty) and deleted the screenshot.

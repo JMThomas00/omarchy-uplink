@@ -1105,17 +1105,30 @@ BarWidget {
   // from a file instead of argv) is the documented alternative for
   // exactly this shape of caller -- used here with a short-lived,
   // owner-only-permission file rather than putting the secret on argv.
+  //
+  // A first version of this fix wrote that file via a bash positional
+  // parameter (`bash -c '...' _ <password> <tmpPath>`) -- caught in
+  // review as its OWN argv leak: `$1` keeps the value out of the SCRIPT
+  // TEXT (safe against injection), but it's still a literal element of
+  // that bash process's own command array, so it was just as readable
+  // via `ps`/`/proc/<pid>/cmdline` for as long as that helper process
+  // ran. This writer process IS one this plugin owns directly, though
+  // (unlike sshpass itself) -- so it gets the same stdin-pipe treatment
+  // as the RDP path instead: the password is fed via write() below,
+  // never appearing in ANY process's argv, including this helper's own.
   function _connectWithSshpass(alias, password) {
     var tmpPath = root._sshTmpDir + "/uplink-ssh-" + Date.now() + "-" + Math.floor(Math.random() * 1e9) + ".tmp"
     // umask 077 makes the file 0600 from the instant it's created -- no
-    // window where a looser default mode is briefly on disk. Password
-    // passed as a bash positional parameter ($1), never string-
-    // concatenated into the script text, matching this file's own
-    // established safe pattern (see the TCP-probe bash -c calls above)
-    // so an arbitrary, unvalidated password value can never be read back
-    // as shell code.
+    // window where a looser default mode is briefly on disk. `head -n1`
+    // (not `cat`) is deliberate: it reads exactly one line and exits on
+    // its own the instant it sees the trailing "\n" write() sends below,
+    // rather than blocking for EOF/stdin to be closed -- this plugin
+    // never explicitly closes a Process's stdin, so anything relying on
+    // EOF to finish would hang forever. Confirmed live this exits
+    // immediately (rc 0) on a still-open pipe, not just on paper.
     var writeProc = sshPasswordWriteProcComponent.createObject(root, {
-      command: ["bash", "-c", "umask 077; printf '%s\\n' \"$1\" > \"$2\"", "_", password, tmpPath]
+      command: ["bash", "-c", "umask 077; head -n1 > \"$1\"", "_", tmpPath],
+      stdinEnabled: true
     })
     writeProc.exited.connect(function(exitCode) {
       writeProc.destroy()
@@ -1146,6 +1159,10 @@ BarWidget {
       timer.start()
     })
     writeProc.running = true
+    // Fed after running=true, same ordering already proven live for the
+    // RDP path above -- the OS pipe buffers this regardless of exactly
+    // when the child gets around to reading it.
+    writeProc.write(password + "\n")
   }
 
   Process { id: staleSshPasswordFilesCleanupProc; command: [] }
