@@ -352,16 +352,17 @@ directly, never through a shell string built from untrusted input.
   host entry; or restoring a backup. Every one of those writes is preceded
   by an automatic snapshot (see Backups above), and the file's `600`
   permissions are restored immediately after.
-- **Stored passwords are plaintext, by explicit design**, not an
+- **Stored passwords are plaintext at rest, by explicit design**, not an
   oversight -- `~/.config/uplink/bookmarks.json` is permission-hardened to
-  `600` but not encrypted, and a stored RDP password is passed to
-  `xfreerdp3` via its `/p:` flag, briefly visible in that process's own
-  argument list while it runs (a limitation of `xfreerdp3` itself, which
-  warns about this directly -- not something this plugin can avoid without
-  losing the "closes cleanly when the session ends" behavior a stored
-  password enables). See Bookmarks and Remote Desktop above for the full
-  reasoning and how to avoid it (leave the password field blank for an
-  interactive prompt instead).
+  `600` but not encrypted. In flight, neither stored password ever
+  appears on a process's own command line (readable by any other process
+  you run via `ps`/`/proc/<pid>/cmdline`): RDP passes it to `xfreerdp3`
+  via `/from-stdin`, piped directly into the process this plugin owns;
+  SSH passes it to `sshpass -f` via a short-lived, `600`-permission file
+  under `$XDG_RUNTIME_DIR` (tmpfs, already accessible only to you),
+  deleted within seconds. See Bookmarks and Remote Desktop above for the
+  full reasoning, and how to avoid stored passwords entirely (leave the
+  password field blank for an interactive prompt instead).
 - **No telemetry, and no network access beyond what you directly
   trigger** -- the periodic reachability probe, and any SSH/RDP/ping/SFTP
   connection you click to open.

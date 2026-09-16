@@ -716,6 +716,9 @@ BarWidget {
       // instead, this process IS omarchy-launch-terminal, and its exit
       // code/stderr say nothing about whether xfreerdp3 itself succeeded.
       property bool detachedLaunch: false
+      // Always on -- harmless for the terminal-wrapped (no stored
+      // password) path, since nothing ever calls write() on that one.
+      stdinEnabled: true
       stderr: StdioCollector {
         waitForEnd: true
         onStreamFinished: proc.capturedStderr = text
@@ -836,7 +839,21 @@ BarWidget {
       // machine shutting down, or the connection dropping all directly
       // end this one process -- there's no separate terminal left
       // lingering to clean up.
-      args.push("/p:" + rdpPassword)
+      //
+      // /from-stdin:force (NOT /p:<password>) -- flagged in marketplace
+      // review (HANCORE-linux, issue #6759): /p: puts the password
+      // straight on this process's own command line, readable by any
+      // same-user process via `ps`/`/proc/<pid>/cmdline`, exactly the
+      // xfreerdp3-itself warning already quoted elsewhere in this file
+      // ("Using /p is insecure"). /from-stdin reads the credential off
+      // this process's own stdin instead -- fed via proc.write() right
+      // after start (see below), never appearing in argv. `force` means
+      // it reads immediately rather than waiting for the server to ask,
+      // so the single write() below always lands where it's expected.
+      // Verified live against a real host: piping the password via
+      // stdin authenticates identically to /p: (same "Logon Info V2"
+      // success line), only the transport differs.
+      args.push("/from-stdin:force")
       command = args
       detached = true
     } else {
@@ -848,6 +865,12 @@ BarWidget {
     }
     var proc = remoteDesktopProcComponent.createObject(root, { command: command, hostAlias: alias || hostname, startedAt: Date.now(), detachedLaunch: detached })
     proc.running = true
+    // Fed after running=true, not before -- Quickshell's own stdin pipe is
+    // only meaningful once the process is actually started, and the OS
+    // pipe buffers this regardless of exactly when xfreerdp3 itself gets
+    // around to reading it (confirmed live: identical behavior whether
+    // piped in before or immediately after launch).
+    if (detached && rdpPassword) proc.write(rdpPassword + "\n")
   }
 
   // ------------------------------------------------------------------ ping
@@ -975,7 +998,7 @@ BarWidget {
     onExited: stateFile.reload()
   }
 
-  Component.onCompleted: { mkdirProc.running = true; root._checkOpenssh(); root._checkFileManager(); root._checkRemoteDesktop(); root._checkSshpass() }
+  Component.onCompleted: { mkdirProc.running = true; root._checkOpenssh(); root._checkFileManager(); root._checkRemoteDesktop(); root._checkSshpass(); root._cleanupStaleSshPasswordFiles() }
 
   // --------------------------------------------------------------- theming
   //
@@ -1032,26 +1055,109 @@ BarWidget {
     // visibly living in a terminal is the whole point, stored password or
     // not.
     var bookmark = bookmarkStore.bookmarks.filter(function(b) { return b.label === alias })[0]
-    // -o StrictHostKeyChecking=accept-new (TOFU, same philosophy as
-    // launchRemoteDesktop's own /cert:tofu) is REQUIRED here, not just
-    // nice-to-have: sshpass only auto-answers a password prompt, never an
-    // unknown-host-key prompt -- confirmed live that ssh's default
-    // behavior (interactive yes/no) leaves sshpass with nothing to feed
-    // it, so it exits immediately (code 6, "Host public key is unknown")
-    // instead of connecting, on literally the first-ever connection to
-    // any host from this machine. Without this flag every stored-password
-    // bookmark's very first SSH connect fails this way. A real host key
-    // CHANGING later still hard-fails as normal -- accept-new only trusts
-    // a host with no existing known_hosts entry, same as a manual `ssh`
-    // would after answering "yes" once.
-    var sshCommand = (bookmark && bookmark.password && root.sshpassAvailable)
-      ? ["sshpass", "-p", bookmark.password, "ssh", "-o", "StrictHostKeyChecking=accept-new", alias]
-      : ["ssh", alias]
+    if (bookmark && bookmark.password && root.sshpassAvailable) {
+      root._connectWithSshpass(alias, bookmark.password)
+      return
+    }
     var proc = launchProcComponent.createObject(root, {
-      command: ["/usr/share/omarchy/bin/omarchy-launch-terminal"].concat(sshCommand)
+      command: ["/usr/share/omarchy/bin/omarchy-launch-terminal", "ssh", alias]
     })
     proc.exited.connect(function() { proc.destroy() })
     proc.running = true
+  }
+
+  // Where a stored SSH password's short-lived credential file lives (see
+  // _connectWithSshpass) -- XDG_RUNTIME_DIR is tmpfs (RAM-backed, never
+  // touches disk) and already 0700-owned by this user alone, so even a
+  // file at default permissions inside it isn't readable by another
+  // account; the explicit 0600 below is defense in depth, not the only
+  // thing protecting it. Falls back to configDir-adjacent storage on the
+  // rare system where XDG_RUNTIME_DIR isn't set at all.
+  readonly property string _sshTmpDir: Quickshell.env("XDG_RUNTIME_DIR") || (Quickshell.env("HOME") + "/.config/uplink")
+
+  Component { id: sshPasswordWriteProcComponent; Process {} }
+  Component { id: sshPasswordCleanupProcComponent; Process {} }
+  Component {
+    id: sshPasswordCleanupTimerComponent
+    Timer {
+      property string tmpPath: ""
+      interval: 10000
+      repeat: false
+      onTriggered: {
+        var proc = sshPasswordCleanupProcComponent.createObject(root, { command: ["rm", "-f", tmpPath] })
+        proc.exited.connect(function() { proc.destroy() })
+        proc.running = true
+        destroy()
+      }
+    }
+  }
+
+  // Flagged in marketplace review (HANCORE-linux, issue #6759): `sshpass
+  // -p <password>` puts the password straight on sshpass's own command
+  // line, readable by any same-user process via `ps`/`/proc/<pid>/
+  // cmdline` -- the same class of exposure as the RDP path's `/p:` flag
+  // (see launchRemoteDesktop's own fix). Unlike RDP, this process isn't
+  // one this plugin owns directly (it lives behind omarchy-launch-
+  // terminal -> ... -> the actual terminal emulator -> sshpass, several
+  // process-generations removed), so a direct stdin pipe from this
+  // plugin's own Process object can't reach it the way it can for RDP's
+  // detached xfreerdp3. sshpass's own `-f <file>` (read the password
+  // from a file instead of argv) is the documented alternative for
+  // exactly this shape of caller -- used here with a short-lived,
+  // owner-only-permission file rather than putting the secret on argv.
+  function _connectWithSshpass(alias, password) {
+    var tmpPath = root._sshTmpDir + "/uplink-ssh-" + Date.now() + "-" + Math.floor(Math.random() * 1e9) + ".tmp"
+    // umask 077 makes the file 0600 from the instant it's created -- no
+    // window where a looser default mode is briefly on disk. Password
+    // passed as a bash positional parameter ($1), never string-
+    // concatenated into the script text, matching this file's own
+    // established safe pattern (see the TCP-probe bash -c calls above)
+    // so an arbitrary, unvalidated password value can never be read back
+    // as shell code.
+    var writeProc = sshPasswordWriteProcComponent.createObject(root, {
+      command: ["bash", "-c", "umask 077; printf '%s\\n' \"$1\" > \"$2\"", "_", password, tmpPath]
+    })
+    writeProc.exited.connect(function(exitCode) {
+      writeProc.destroy()
+      if (exitCode !== 0) return
+      // -o StrictHostKeyChecking=accept-new (TOFU, same philosophy as
+      // launchRemoteDesktop's own /cert:tofu) is REQUIRED here, not just
+      // nice-to-have: sshpass only auto-answers a password prompt, never
+      // an unknown-host-key prompt -- confirmed live that ssh's default
+      // behavior (interactive yes/no) leaves sshpass with nothing to
+      // feed it, so it exits immediately (code 6, "Host public key is
+      // unknown") instead of connecting, on literally the first-ever
+      // connection to any host from this machine. A real host key
+      // CHANGING later still hard-fails as normal -- accept-new only
+      // trusts a host with no existing known_hosts entry, same as a
+      // manual `ssh` would after answering "yes" once.
+      var proc = launchProcComponent.createObject(root, {
+        command: ["/usr/share/omarchy/bin/omarchy-launch-terminal", "sshpass", "-f", tmpPath, "ssh", "-o", "StrictHostKeyChecking=accept-new", alias]
+      })
+      proc.exited.connect(function() { proc.destroy() })
+      proc.running = true
+      // Deleted shortly after launch rather than the instant sshpass has
+      // read it -- this plugin has no visibility into that moment (the
+      // real sshpass process is several generations removed behind
+      // omarchy-launch-terminal/xdg-terminal-exec/the terminal emulator,
+      // not a direct child), so a short, generous delay stands in for it
+      // instead. 10s is well beyond the sub-2s this took live end-to-end.
+      var timer = sshPasswordCleanupTimerComponent.createObject(root, { tmpPath: tmpPath })
+      timer.start()
+    })
+    writeProc.running = true
+  }
+
+  Process { id: staleSshPasswordFilesCleanupProc; command: [] }
+
+  // Best-effort startup sweep for any leftover per-connection password
+  // file from a session that crashed or was killed before its own
+  // cleanup timer fired -- XDG_RUNTIME_DIR is wiped on logout/reboot
+  // regardless, so this is tidiness on top of an already-narrow exposure
+  // window, not the only thing standing between a stale file and anyone.
+  function _cleanupStaleSshPasswordFiles() {
+    staleSshPasswordFilesCleanupProc.command = ["bash", "-c", "rm -f \"$1\"/uplink-ssh-*.tmp", "_", root._sshTmpDir]
+    staleSshPasswordFilesCleanupProc.running = true
   }
 
   // ------------------------------------------------------------- panel/bar

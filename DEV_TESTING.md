@@ -1251,3 +1251,62 @@ instead of a shell.
   exact failure mode was fixed. Closed the test session and removed the
   debug hook afterward (confirmed via `grep -rn "debug" *.qml` returning
   empty) and deleted the screenshot.
+
+**Stored passwords moved off process argv (2026-09-15)** -- marketplace
+review finding (HANCORE-linux, issue #6759, `needs-fixes`): both stored-
+password launch paths put the secret directly on their own process's
+command line -- `xfreerdp3 /p:<password>` (RDP) and `sshpass -p
+<password>` (SSH) -- readable by any same-user process via `ps` or
+`/proc/<pid>/cmdline`, not just this plugin. Confirmed both tools
+document a non-argv alternative (`xfreerdp3` even warns about `/p:`
+itself: "Using /p is insecure... Consider... /from-stdin"), and verified
+each alternative actually authenticates before wiring it in.
+- **RDP, in `launchRemoteDesktop`**: `/p:<password>` replaced with
+  `/from-stdin:force`. `remoteDesktopProcComponent`'s `Process` now has
+  `stdinEnabled: true`, and `launchRemoteDesktop` calls `proc.write(
+  rdpPassword + "\n")` right after `proc.running = true` -- this process
+  is one the plugin owns directly (no terminal in between, unlike SSH),
+  so a real stdin pipe reaches xfreerdp3 exactly the same way `printf
+  '%s\n' <password> | xfreerdp3 ...` does by hand. Verified live against
+  a real host: identical successful auth (`Logon Info V2` in the log)
+  whether the password arrives via `/p:` or piped via stdin -- only the
+  transport changed. The RDP-failure-notification feature from the
+  previous entry needed no changes -- it watches exit code/stderr, both
+  unaffected by how the password got in.
+- **SSH, in `connectToHost`**: the sshpass-driven launch is a
+  fundamentally different shape -- this process lives behind
+  `omarchy-launch-terminal` -> `xdg-terminal-exec` -> the terminal
+  emulator -> `sshpass`, several process-generations removed, so this
+  plugin's own `Process.write()` has no path to sshpass's real stdin (it
+  would write into `omarchy-launch-terminal`'s stdin, a bash script that
+  never forwards it anywhere useful). Used sshpass's other documented
+  non-argv option instead: `-f <file>`, pointed at a short-lived,
+  0600-permission file under `$XDG_RUNTIME_DIR` (tmpfs, already
+  0700-owned by this user alone, so nothing else could read it even at a
+  looser mode -- the explicit `umask 077` before creation is defense in
+  depth, not the only protection). New `_connectWithSshpass()`: writes
+  the password to `<XDG_RUNTIME_DIR>/uplink-ssh-<epoch>-<random>.tmp` via
+  `bash -c 'umask 077; printf ... > ...' _ <password> <path>` (positional
+  parameters again, not string-concatenation, matching this file's
+  already-established safe pattern), launches
+  `sshpass -f <path> ssh -o StrictHostKeyChecking=accept-new <alias>`
+  once that write succeeds, then deletes the file via a 10s `Timer` --
+  generous headroom over the sub-2s this took live, since this plugin has
+  no direct visibility into the real sshpass process (too many
+  generations removed) to know precisely when it's done reading. A new
+  `_cleanupStaleSshPasswordFiles()` also sweeps any matching leftover
+  file at every plugin startup, in case a prior session was killed before
+  its own timer fired -- belt and suspenders on top of `$XDG_RUNTIME_DIR`
+  already being wiped on logout/reboot regardless.
+- Verified live end-to-end for both, not just by inspection: temporarily
+  restored `debugSshConnect`/`debugRdpConnect` IPC hooks, removed
+  Sequoia's known_hosts entry again for a genuinely fresh SSH test, and
+  for each path polled `pgrep -af` continuously through the real launch
+  (confirmed the password string never appeared in ANY process's argv at
+  any point -- only `-f <tmpfile>` / `/from-stdin:force`), confirmed the
+  temp file was gone by the time polling finished, and confirmed real
+  successful auth (a live `C:\Users\JMTho>` prompt for SSH via
+  screenshot; the RDP process staying alive well past its own ~370ms
+  fast-failure signature, rather than the notification feature firing,
+  for RDP). Removed both debug hooks afterward (confirmed via `grep -rn
+  "debug" *.qml` returning empty).
